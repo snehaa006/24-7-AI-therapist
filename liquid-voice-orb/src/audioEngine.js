@@ -138,6 +138,12 @@ export class AudioEngine {
     this._demoStart = performance.now();
   }
 
+  /** Orb follows a playing <audio> element (the AI's natural voice). */
+  showAudio(el) {
+    this._demo = false;
+    this.attachElement(el);
+  }
+
   /** Orb rests. */
   showIdle() {
     this._demo = false;
