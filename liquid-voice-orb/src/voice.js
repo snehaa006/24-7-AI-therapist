@@ -279,22 +279,42 @@ export const NATURAL_VOICES = [
   { id: 'Zephyr', note: 'Bright' },
 ];
 
-async function speakNatural(text, { naturalVoice, rate = 1 }, token, onStart) {
-  const ctrl = new AbortController();
-  token.abort = () => ctrl.abort();
-  const res = await fetch('/api/speak', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice: naturalVoice }),
-    signal: ctrl.signal,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.detail || `Voice error ${res.status}`);
-  }
-  const url = URL.createObjectURL(await res.blob());
-  if (current !== token) return URL.revokeObjectURL(url);
+// Audio already generated in this tab, keyed by voice + text (previews, greeting, retries).
+const audioCache = new Map();
 
+function fetchVoice(text, voice) {
+  const key = `${voice}|${text}`;
+  if (!audioCache.has(key)) {
+    const p = fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice }),
+    }).then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `Voice error ${res.status}`);
+      }
+      return res.blob();
+    });
+    p.catch(() => audioCache.delete(key)); // don't cache failures
+    audioCache.set(key, p);
+    if (audioCache.size > 40) audioCache.delete(audioCache.keys().next().value);
+  }
+  return audioCache.get(key);
+}
+
+// Gemini generates the whole clip before sending it, and longer clips take longer.
+// So the first sentence goes on its own (short → starts playing sooner) while the
+// rest is generated in parallel and is usually ready by the time it's needed.
+function voiceChunks(text) {
+  const parts = sentences(text);
+  let first = '';
+  while (parts.length && first.length < 15) first = `${first} ${parts.shift()}`.trim();
+  return parts.length ? [first, parts.join(' ')] : [first];
+}
+
+async function playBlob(blob, rate, token, onStart) {
+  const url = URL.createObjectURL(blob);
   const el = new Audio(url);
   el.playbackRate = rate;
   el.preservesPitch = true;
@@ -311,10 +331,23 @@ async function speakNatural(text, { naturalVoice, rate = 1 }, token, onStart) {
   }
 }
 
+async function speakNatural(text, { naturalVoice, rate = 1 }, token, onStart) {
+  const chunks = voiceChunks(text);
+  const clips = chunks.map((c) => fetchVoice(c, naturalVoice)); // all requested at once
+  clips.forEach((p) => p.catch(() => {})); // handled below, in order
+  for (let i = 0; i < chunks.length; i++) {
+    token.remaining = chunks.slice(i).join(' '); // what the device voice should say if this fails
+    const blob = await clips[i];
+    if (current !== token) return;
+    await playBlob(blob, rate, token, onStart);
+    if (current !== token) return;
+  }
+}
+
 /**
  * Speak `text` with the chosen voice settings; resolves when finished or cancelled.
- * `onStart(audioEl|null)` fires when sound begins (audioEl is set for natural voices,
- * so it can drive the orb). Natural voices fall back to the device voice on failure,
+ * `onStart(audioEl|null)` fires when sound begins, and again for each natural-voice clip
+ * (audioEl is set for natural voices, so it can drive the orb). Natural voices fall back to the device voice on failure,
  * calling `onFallback(error)`.
  */
 export async function speak(text, settings = {}, { onStart, onFallback } = {}) {
@@ -327,8 +360,10 @@ export async function speak(text, settings = {}, { onStart, onFallback } = {}) {
         await speakNatural(text, settings, token, onStart);
         return;
       } catch (e) {
-        if (current !== token || e.name === 'AbortError') return;
+        if (current !== token) return;
         onFallback?.(e);
+        await speakDevice(token.remaining || text, settings, token, onStart);
+        return;
       }
     }
     await speakDevice(text, settings, token, onStart);
@@ -340,7 +375,6 @@ export async function speak(text, settings = {}, { onStart, onFallback } = {}) {
 export function stopSpeaking() {
   const token = current;
   current = null;
-  token?.abort?.();
   if (token?.audio) token.audio.pause();
   window.speechSynthesis?.cancel();
 }

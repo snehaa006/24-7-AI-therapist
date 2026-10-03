@@ -54,7 +54,7 @@ Open http://localhost:5173 **in Chrome**, slide **Start Now**, and allow the mic
 
 Tap **Voice** (on the start screen or during a session):
 
-- **Natural voices.** 16 Gemini voices (Sulafat, Achernar, Vindemiatrix…) via `POST /api/speak`. They sound lifelike but add a moment before each reply and use your Gemini quota, which is low for text-to-speech on the free tier. If a request fails, the app switches to the device voice for the rest of the session and tells you.
+- **Natural voices.** 16 Gemini voices (Sulafat, Achernar, Vindemiatrix…) via `POST /api/speak`. They sound lifelike, but Gemini makes the whole clip before sending it, so new lines take a few seconds. To cut the wait, the first sentence is generated on its own and the rest in parallel. Generated audio is cached in `server/.tts-cache/`, so the greeting and previews replay instantly. Uses your Gemini quota (up to two voice requests per reply), which is low for text-to-speech on the free tier. If a request fails, the app switches to the device voice for the rest of the session and tells you.
 - **Device voices.** Any voice built into your browser or OS. Instant, with pitch control.
 - **Speed**, and **When to reply**: Quick, Natural or Patient.
 

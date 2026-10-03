@@ -47,8 +47,9 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
       return;
     }
     setNote('');
-    setPreviewing(true);
+    setPreviewing('loading');
     await speak(PREVIEW, settings, {
+      onStart: () => setPreviewing('playing'),
       onFallback: (e) => setNote(`Natural voice unavailable, so this is the device voice. (${e.message})`),
     });
     setPreviewing(false);
@@ -79,7 +80,7 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
           />
           <p className="hint">
             {natural
-              ? 'Lifelike Gemini voices. Adds a moment before each reply and uses your Gemini quota.'
+              ? 'Lifelike Gemini voices. Each new line takes a few seconds to generate (replies start after the first sentence is ready); anything heard before replays instantly. Uses your Gemini quota.'
               : 'Voices built into this device. Instant, works offline, sounds more robotic.'}
           </p>
         </section>
@@ -143,7 +144,7 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
 
         {canPreview ? (
           <button className="preview" onClick={preview}>
-            {previewing ? 'Stop preview' : 'Preview voice'}
+            {{ loading: 'Generating voice… (tap to cancel)', playing: 'Stop preview' }[previewing] || 'Preview voice'}
           </button>
         ) : (
           <p className="hint">Changes apply from the next reply.</p>
