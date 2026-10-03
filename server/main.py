@@ -9,9 +9,11 @@ here keeps the API key out of the browser.
 Run:  uvicorn main:app --reload --port 8000
 """
 
+import hashlib
 import io
 import os
 import wave
+from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -168,7 +170,11 @@ VOICES = {
     "Kore", "Charon", "Aoede", "Puck", "Leda", "Zephyr", "Gacrux", "Iapetus",
 }
 
-TTS_STYLE = "Say this slowly, in a calm, warm and gentle voice, like a caring listener:"
+# Kept short: the longer the audio, the longer Gemini takes to generate it. Speed is set in the app.
+TTS_STYLE = "Say in a calm, warm, gentle voice:"
+
+# Generated audio is saved here, so repeated lines (greeting, previews) play instantly and cost no quota.
+TTS_CACHE = Path(__file__).parent / ".tts-cache"
 
 
 class SpeakRequest(BaseModel):
@@ -190,6 +196,11 @@ def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
 async def speak(req: SpeakRequest):
     if req.voice not in VOICES:
         raise HTTPException(400, f"Unknown voice {req.voice!r}.")
+    key = hashlib.sha256(f"{TTS_MODEL}|{TTS_STYLE}|{req.voice}|{req.text}".encode()).hexdigest()
+    cached = TTS_CACHE / f"{key}.wav"
+    if cached.exists():
+        return Response(content=cached.read_bytes(), media_type="audio/wav")
+
     config = types.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(
@@ -216,4 +227,9 @@ async def speak(req: SpeakRequest):
             if part.strip().startswith("rate="):
                 rate = int(part.split("=")[1])
         audio = pcm_to_wav(audio, rate)
+    try:
+        TTS_CACHE.mkdir(exist_ok=True)
+        cached.write_bytes(audio)
+    except OSError:
+        pass  # caching is best-effort
     return Response(content=audio, media_type="audio/wav")
