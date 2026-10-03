@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import LiquidOrb from './LiquidOrb.jsx';
 import SwipeToStart from './SwipeToStart.jsx';
+import VoiceSettings from './VoiceSettings.jsx';
+import { useSettings } from './settings.js';
 import { AudioEngine } from './audioEngine.js';
 import { voiceSupported } from './voice.js';
 import { FIXED_MODE, useTherapySession } from './useTherapySession.js';
@@ -48,13 +50,33 @@ function Backdrop() {
   );
 }
 
-function Landing({ onStart }) {
+function GearButton({ onClick }) {
+  return (
+    <button className="ghost icon" onClick={onClick} aria-label="Voice settings">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        <path
+          d="M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      </svg>
+      <span>Voice</span>
+    </button>
+  );
+}
+
+function Landing({ onStart, onSettings }) {
   return (
     <section className="screen landing">
       <header className="hero">
-        <p className="eyebrow">
-          <span className="dot" /> Available 24/7
-        </p>
+        <div className="hero-top">
+          <p className="eyebrow">
+            <span className="dot" /> Available 24/7
+          </p>
+          <GearButton onClick={onSettings} />
+        </div>
         <h1>
           Someone
           <br />
@@ -83,8 +105,8 @@ function Landing({ onStart }) {
   );
 }
 
-function Session({ session, onEnd }) {
-  const { phase, history, interim, error, interrupt, send } = session;
+function Session({ session, onEnd, onSettings }) {
+  const { phase, history, interim, waiting, error, interrupt, send } = session;
   const clock = useElapsed(true);
   const [showLog, setShowLog] = useState(false);
   const [draft, setDraft] = useState('');
@@ -105,14 +127,17 @@ function Session({ session, onEnd }) {
           <span>Session</span>
           <span className="clock">{clock}</span>
         </div>
-        <button className="ghost" onClick={onEnd}>
-          End
-        </button>
+        <div className="session-buttons">
+          <GearButton onClick={onSettings} />
+          <button className="ghost" onClick={onEnd}>
+            End
+          </button>
+        </div>
       </header>
 
       <div className="captions" aria-live="polite">
-        <p className="phase" data-phase={phase}>
-          {PHASE_LABEL[phase]}
+        <p className="phase" data-phase={phase} data-waiting={waiting}>
+          {phase === 'listening' && waiting ? 'Take your time' : PHASE_LABEL[phase]}
           {phase === 'thinking' && <span className="ellipsis" />}
         </p>
         {!showLog && (
@@ -173,8 +198,11 @@ export default function App() {
   if (!engineRef.current) engineRef.current = new AudioEngine();
   const engine = engineRef.current;
 
-  const session = useTherapySession(engine);
+  const [settings, updateSettings] = useSettings();
+  const session = useTherapySession(engine, settings);
   const [inSession, setInSession] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const openSettings = () => setShowSettings(true);
 
   const start = () => {
     session.start(); // must run inside the gesture so speech output is allowed
@@ -189,7 +217,14 @@ export default function App() {
     <main className="stage">
       <LiquidOrb engine={engine} background={BG} distance={inSession ? 9 : 10.5} lift={inSession ? 0.08 : 0.02} />
       <Backdrop />
-      {inSession ? <Session session={session} onEnd={end} /> : <Landing onStart={start} />}
+      {inSession ? (
+        <Session session={session} onEnd={end} onSettings={openSettings} />
+      ) : (
+        <Landing onStart={start} onSettings={openSettings} />
+      )}
+      {showSettings && (
+        <VoiceSettings settings={settings} update={updateSettings} onClose={() => setShowSettings(false)} canPreview={!inSession} />
+      )}
     </main>
   );
 }
