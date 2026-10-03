@@ -41,5 +41,12 @@ export function installFakes() {
   };
   Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true });
 
+  // Count beacons in storage, which outlives the page that sent them.
+  const beacon = navigator.sendBeacon.bind(navigator);
+  navigator.sendBeacon = (...args) => {
+    localStorage.setItem('__beacons', String(Number(localStorage.getItem('__beacons')) + 1));
+    return beacon(...args);
+  };
+
   localStorage.setItem('voice-settings-v1', JSON.stringify({ source: 'device', pacing: 'quick' }));
 }

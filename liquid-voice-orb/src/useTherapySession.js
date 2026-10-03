@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TurnListener, speak, stopSpeaking } from './voice.js';
+import { fetchGreeting, newSessionId, saveSession, userId } from './memory.js';
 
 const GREETING = "Hi, I'm here, and I'm listening. What's on your mind today?";
 
@@ -23,7 +24,7 @@ async function postJSON(url, body) {
 /** → { reply, crisis, speech?, resources? }. On a crisis the server sends a fixed script, never AI text. */
 async function fetchReply(history) {
   if (FIXED_MODE) return { reply: FIXED_REPLY, crisis: false };
-  return postJSON('/api/chat', { history });
+  return postJSON('/api/chat', { history, user_id: userId() });
 }
 
 /**
@@ -47,6 +48,7 @@ export function useTherapySession(engine, settings) {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const naturalFailedRef = useRef(false); // after one failure, use the device voice for the rest of the session
+  const sessionIdRef = useRef(null); // set while a session is open and not yet saved to memory
 
   const commit = (turns) => {
     historyRef.current = turns;
@@ -158,25 +160,40 @@ export function useTherapySession(engine, settings) {
     });
   }
 
+  /** Send the session to be remembered, once. `beacon` when the tab is closing. */
+  const save = useCallback((beacon = false) => {
+    const sid = sessionIdRef.current;
+    sessionIdRef.current = null;
+    if (!sid || FIXED_MODE) return;
+    if (!historyRef.current.some((t) => t.role === 'user')) return;
+    saveSession(sid, historyRef.current, { beacon });
+  }, []);
+
   /** Call from a click/tap so the browser allows speech output. */
-  const start = useCallback(() => {
+  const start = useCallback(async () => {
     const id = ++sessionRef.current;
     turnRef.current++;
+    sessionIdRef.current = newSessionId();
     naturalFailedRef.current = false;
     setError('');
-    setCrisis(null);
     setInterim('');
-    commit([{ role: 'assistant', text: GREETING }]);
+    setCrisis(null);
+    commit([]);
     setPhase('thinking');
     // Ask for the mic while the greeting plays; the stream drives the orb while listening.
     engine.openMic().catch(() => {
       if (sessionRef.current !== id) return;
       setError('Microphone access was blocked. Allow it for this site and start again.');
     });
-    say(GREETING);
+    // Returning users get a greeting that picks up from last time.
+    const greeting = (!FIXED_MODE && (await fetchGreeting())) || GREETING;
+    if (sessionRef.current !== id) return;
+    commit([{ role: 'assistant', text: greeting }]);
+    say(greeting);
   }, [engine, say]);
 
   const end = useCallback(() => {
+    save();
     sessionRef.current++;
     turnRef.current++;
     listenerRef.current?.stop();
@@ -185,7 +202,14 @@ export function useTherapySession(engine, settings) {
     setPhase('idle');
     setInterim('');
     setWaiting(false);
-  }, [engine]);
+  }, [engine, save]);
+
+  // Closing or leaving the tab mid-session still saves it.
+  useEffect(() => {
+    const onHide = () => save(true);
+    window.addEventListener('pagehide', onHide);
+    return () => window.removeEventListener('pagehide', onHide);
+  }, [save]);
 
   /** Cut the AI off and go straight to listening. */
   const interrupt = useCallback(() => {

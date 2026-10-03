@@ -746,3 +746,61 @@ input {
   outline: 2px solid #9fd8ff;
   outline-offset: 2px;
 }
+
+/* ── memory panel ────────────────────────────────────────────────────────── */
+.memory-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.memory-list li:first-child {
+  border-top: 0;
+}
+
+.memory-list button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.memory-list button:hover,
+.memory-list button:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  outline: none;
+}
+
+.memory-summary,
+.memory-empty {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.memory-empty {
+  margin-top: 18px;
+}
+
+.preview.danger {
+  background: #ffb4c8;
+}

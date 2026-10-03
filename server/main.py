@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import memory
 import safety
 
 load_dotenv()
@@ -31,6 +32,7 @@ MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-2.5-flash-lite")  # fast "is the user done talking?" check
 SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-2.5-flash-lite")  # labels each message normal/crisis
 TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-2.5-flash")  # end-of-session notes and the returning greeting
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
 SYSTEM_PROMPT = """\
@@ -69,11 +71,17 @@ def client() -> genai.Client:
 class Turn(BaseModel):
     role: Literal["user", "assistant"]
     text: str = Field(max_length=4000)
+    crisis: bool = False  # set by the app on turns the safety layer flagged; never stored in memory
+
+
+def UserId(**kw):  # anonymous ids made by the browser (a UUID)
+    return Field(pattern=memory.USER_ID.pattern, **kw)
 
 
 class ChatRequest(BaseModel):
     # Full session history, oldest first, ending with the user's latest message.
     history: list[Turn] = Field(min_length=1)
+    user_id: str | None = UserId(default=None)  # anonymous id from the browser; loads what's remembered about them
 
 
 class ChatResponse(BaseModel):
@@ -85,9 +93,10 @@ class ChatResponse(BaseModel):
 
 def to_contents(history: list[Turn]) -> list[types.Content]:
     turns = [t for t in history if t.text.strip()][-MAX_TURNS:]
-    # Gemini expects the conversation to start with a user turn.
-    while turns and turns[0].role != "user":
-        turns.pop(0)
+    # Gemini expects the conversation to start with a user turn. Keep the opening greeting
+    # (it may refer to last session) by putting a stand-in user turn in front of it.
+    if turns and turns[0].role != "user":
+        turns.insert(0, Turn(role="user", text="(opens the app)"))
     return [
         types.Content(role="user" if t.role == "user" else "model", parts=[types.Part(text=t.text.strip())])
         for t in turns
@@ -101,10 +110,10 @@ def no_thinking(model: str, config: types.GenerateContentConfig) -> types.Genera
     return config
 
 
-def generation_config() -> types.GenerateContentConfig:
+def generation_config(memories: str = "") -> types.GenerateContentConfig:
     return no_thinking(
         MODEL,
-        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.8, max_output_tokens=300),
+        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT + memories, temperature=0.8, max_output_tokens=300),
     )
 
 
@@ -123,8 +132,8 @@ def crisis_response() -> ChatResponse:
     return ChatResponse(reply=safety.script(res), speech=safety.script(res, spoken=True), crisis=True, resources=res)
 
 
-async def generate_reply(contents: list[types.Content]) -> str:
-    resp = await client().aio.models.generate_content(model=MODEL, contents=contents, config=generation_config())
+async def generate_reply(contents: list[types.Content], memories: str = "") -> str:
+    resp = await client().aio.models.generate_content(model=MODEL, contents=contents, config=generation_config(memories))
     return (resp.text or "").strip()
 
 
@@ -139,7 +148,7 @@ async def chat(req: ChatRequest):
     contents = to_contents(req.history)
     gemini = client()  # fails early with a clear message if the key is missing
     # The safety label and the reply are requested together so screening adds no delay.
-    reply_task = asyncio.create_task(generate_reply(contents))
+    reply_task = asyncio.create_task(generate_reply(contents, memory.prompt_block(req.user_id)))
     reply_task.add_done_callback(lambda t: t.cancelled() or t.exception())  # no "never retrieved" warning if dropped
     if await safety.classify(gemini, SAFETY_MODEL, req.history):
         reply_task.cancel()
@@ -154,6 +163,72 @@ async def chat(req: ChatRequest):
     if not reply:
         raise HTTPException(502, "Gemini returned an empty reply.")
     return ChatResponse(reply=reply)
+
+
+# ── Memory (step 4) ──────────────────────────────────────────────────────────
+
+
+class StartRequest(BaseModel):
+    user_id: str = UserId()
+
+
+class StartResponse(BaseModel):
+    greeting: str | None = None  # None: nothing remembered yet, the app uses its usual greeting
+
+
+@app.post("/api/session/start", response_model=StartResponse)
+async def session_start(req: StartRequest):
+    if not memory.prompt_block(req.user_id):
+        return StartResponse()
+    try:
+        greeting = await memory.gemini_greeting(client(), MEMORY_MODEL, req.user_id)
+    except Exception:  # missing key, quota: fall back to the usual greeting
+        return StartResponse()
+    if not greeting or safety.keyword_crisis(greeting):
+        return StartResponse()
+    return StartResponse(greeting=greeting)
+
+
+class EndRequest(BaseModel):
+    user_id: str = UserId()
+    session_id: str = UserId()
+    history: list[Turn] = Field(default_factory=list, max_length=400)
+
+
+@app.post("/api/session/end")
+async def session_end(req: EndRequest):
+    """Called by the End button, or by navigator.sendBeacon when the tab closes."""
+    if memory.session_saved(req.session_id):
+        return {"saved": 0, "note": "already saved"}
+    turns = memory.safe_turns(req.history)
+    if not any(t.role == "user" for t in turns):
+        return {"saved": 0, "note": "nothing to remember"}
+    known = memory.list_memories(req.user_id)
+    try:
+        found = await memory.gemini_extract(client(), MEMORY_MODEL, known, turns)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Gemini request failed: {e}") from e
+    return {"saved": memory.merge(req.user_id, req.session_id, found)}
+
+
+@app.get("/api/memories")
+def get_memories(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    return {"memories": memory.list_memories(user_id), "last_summary": memory.last_summary(user_id)}
+
+
+@app.delete("/api/memories/{memory_id}")
+def delete_memory(memory_id: int, user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    if not memory.delete_memory(user_id, memory_id):
+        raise HTTPException(404, "No such memory.")
+    return {"ok": True}
+
+
+@app.delete("/api/memories")
+def forget_everything(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    memory.forget_all(user_id)
+    return {"ok": True}
 
 
 # ── End-of-turn check ────────────────────────────────────────────────────────

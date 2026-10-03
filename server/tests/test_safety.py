@@ -27,7 +27,7 @@ def api(monkeypatch):
             raise state["label"]
         return state["label"]
 
-    async def fake_reply(contents):
+    async def fake_reply(contents, memories=""):
         state["reply_started"] = True
         state["calls"].append(("reply", contents[-1].parts[0].text))
         await asyncio.sleep(0.05)

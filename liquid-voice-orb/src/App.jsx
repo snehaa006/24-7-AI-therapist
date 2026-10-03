@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import LiquidOrb from './LiquidOrb.jsx';
 import SwipeToStart from './SwipeToStart.jsx';
 import VoiceSettings from './VoiceSettings.jsx';
+import MemoryPanel from './MemoryPanel.jsx';
 import { useSettings } from './settings.js';
 import { AudioEngine } from './audioEngine.js';
 import { voiceSupported } from './voice.js';
@@ -67,7 +68,7 @@ function GearButton({ onClick }) {
   );
 }
 
-function Landing({ onStart, onSettings }) {
+function Landing({ onStart, onSettings, onMemories }) {
   return (
     <section className="screen landing">
       <header className="hero">
@@ -75,7 +76,14 @@ function Landing({ onStart, onSettings }) {
           <p className="eyebrow">
             <span className="dot" /> Available 24/7
           </p>
-          <GearButton onClick={onSettings} />
+          <div className="session-buttons">
+            {!FIXED_MODE && (
+              <button className="ghost" onClick={onMemories}>
+                Memories
+              </button>
+            )}
+            <GearButton onClick={onSettings} />
+          </div>
         </div>
         <h1>
           Someone
@@ -236,6 +244,7 @@ export default function App() {
   const session = useTherapySession(engine, settings);
   const [inSession, setInSession] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showMemories, setShowMemories] = useState(false);
   const openSettings = () => setShowSettings(true);
 
   const start = () => {
@@ -254,8 +263,9 @@ export default function App() {
       {inSession ? (
         <Session session={session} onEnd={end} onSettings={openSettings} />
       ) : (
-        <Landing onStart={start} onSettings={openSettings} />
+        <Landing onStart={start} onSettings={openSettings} onMemories={() => setShowMemories(true)} />
       )}
+      {showMemories && <MemoryPanel onClose={() => setShowMemories(false)} />}
       {showSettings && (
         <VoiceSettings settings={settings} update={updateSettings} onClose={() => setShowSettings(false)} canPreview={!inSession} />
       )}
