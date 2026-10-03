@@ -3,4 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // FastAPI backend (see ../server). Keeps the Gemini key out of the browser.
+    proxy: { '/api': 'http://127.0.0.1:8000' },
+  },
 });

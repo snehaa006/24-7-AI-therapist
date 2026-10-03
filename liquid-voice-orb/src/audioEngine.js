@@ -115,6 +115,35 @@ export class AudioEngine {
     await el.play();
   }
 
+  // ── conversation modes (mic stays open between turns) ──────────────────────
+  /** Ask for the mic once and keep the stream for the whole session. */
+  async openMic() {
+    this.ensure();
+    if (this._stream) return;
+    this._stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+  }
+
+  /** Orb follows the user's voice. */
+  showMic() {
+    this._demo = false;
+    if (this._stream) this.attachStream(this._stream);
+  }
+
+  /** Orb pulses like speech (browser text-to-speech can't be routed through Web Audio). */
+  showVoice() {
+    this._detach();
+    this._demo = true;
+    this._demoStart = performance.now();
+  }
+
+  /** Orb rests. */
+  showIdle() {
+    this._demo = false;
+    this._detach();
+  }
+
   stop() {
     this._demo = false;
     this._detach();
