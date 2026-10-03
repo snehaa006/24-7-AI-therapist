@@ -1,5 +1,5 @@
 """
-Conversation backend (build plan step 2).
+Conversation backend (build plan steps 2-4).
 
 The browser does speech-to-text. This server turns the conversation so far into
 the next reply, decides whether the user has finished speaking, and (for the
@@ -9,6 +9,7 @@ here keeps the API key out of the browser.
 Run:  uvicorn main:app --reload --port 8000
 """
 
+import asyncio
 import hashlib
 import io
 import os
@@ -22,10 +23,13 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import safety
+
 load_dotenv()
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-2.5-flash-lite")  # fast "is the user done talking?" check
+SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-2.5-flash-lite")  # labels each message normal/crisis
 TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
@@ -74,6 +78,9 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    crisis: bool = False
+    speech: str | None = None  # what to say aloud, when it differs from `reply` (numbers read as digits)
+    resources: dict | None = None  # helpline details for the on-screen crisis card
 
 
 def to_contents(history: list[Turn]) -> list[types.Content]:
@@ -101,24 +108,49 @@ def generation_config() -> types.GenerateContentConfig:
     )
 
 
+@app.get("/api/crisis")
+def crisis_resources():
+    return safety.resources()
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))}
+
+
+def crisis_response() -> ChatResponse:
+    res = safety.resources()
+    return ChatResponse(reply=safety.script(res), speech=safety.script(res, spoken=True), crisis=True, resources=res)
+
+
+async def generate_reply(contents: list[types.Content]) -> str:
+    resp = await client().aio.models.generate_content(model=MODEL, contents=contents, config=generation_config())
+    return (resp.text or "").strip()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if req.history[-1].role != "user":
         raise HTTPException(400, "The last turn must be the user's message.")
+    # Safety first: a keyword match is a crisis, no model needed.
+    if safety.keyword_crisis(req.history[-1].text):
+        return crisis_response()
+
     contents = to_contents(req.history)
+    gemini = client()  # fails early with a clear message if the key is missing
+    # The safety label and the reply are requested together so screening adds no delay.
+    reply_task = asyncio.create_task(generate_reply(contents))
+    reply_task.add_done_callback(lambda t: t.cancelled() or t.exception())  # no "never retrieved" warning if dropped
+    if await safety.classify(gemini, SAFETY_MODEL, req.history):
+        reply_task.cancel()
+        return crisis_response()
+
     try:
-        resp = await client().aio.models.generate_content(model=MODEL, contents=contents, config=generation_config())
+        reply = await reply_task
     except HTTPException:
         raise
     except Exception as e:  # network, quota, bad key, unknown model
         raise HTTPException(502, f"Gemini request failed: {e}") from e
-
-    reply = (resp.text or "").strip()
     if not reply:
         raise HTTPException(502, "Gemini returned an empty reply.")
     return ChatResponse(reply=reply)

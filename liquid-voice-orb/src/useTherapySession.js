@@ -20,9 +20,10 @@ async function postJSON(url, body) {
   return res.json();
 }
 
+/** → { reply, crisis, speech?, resources? }. On a crisis the server sends a fixed script, never AI text. */
 async function fetchReply(history) {
-  if (FIXED_MODE) return FIXED_REPLY;
-  return (await postJSON('/api/chat', { history })).reply;
+  if (FIXED_MODE) return { reply: FIXED_REPLY, crisis: false };
+  return postJSON('/api/chat', { history });
 }
 
 /**
@@ -36,6 +37,7 @@ export function useTherapySession(engine, settings) {
   const [interim, setInterim] = useState('');
   const [waiting, setWaiting] = useState(false);
   const [error, setError] = useState('');
+  const [crisis, setCrisis] = useState(null); // helpline details while the crisis card is showing
 
   const historyRef = useRef([]);
   const beforeTurnRef = useRef([]); // history before the user's pending turn (restored if they keep talking)
@@ -100,9 +102,9 @@ export function useTherapySession(engine, settings) {
       setPhase('thinking');
       engine.showIdle();
 
-      let reply;
+      let res;
       try {
-        reply = await fetchReply(withUser);
+        res = await fetchReply(withUser);
       } catch (e) {
         if (turnRef.current !== turn) return;
         commit(before); // drop the turn so the user can simply say it again
@@ -111,8 +113,14 @@ export function useTherapySession(engine, settings) {
         return;
       }
       if (turnRef.current !== turn) return;
-      commit([...withUser, { role: 'assistant', text: reply }]);
-      say(reply);
+      if (res.crisis) {
+        // Flagged turns are kept out of memory (step 4).
+        commit([...before, { role: 'user', text, crisis: true }, { role: 'assistant', text: res.reply, crisis: true }]);
+        setCrisis(res.resources);
+      } else {
+        commit([...withUser, { role: 'assistant', text: res.reply }]);
+      }
+      say(res.speech || res.reply);
     },
     [engine, say]
   );
@@ -156,6 +164,7 @@ export function useTherapySession(engine, settings) {
     turnRef.current++;
     naturalFailedRef.current = false;
     setError('');
+    setCrisis(null);
     setInterim('');
     commit([{ role: 'assistant', text: GREETING }]);
     setPhase('thinking');
@@ -197,5 +206,7 @@ export function useTherapySession(engine, settings) {
 
   useEffect(() => () => end(), [end]);
 
-  return { phase, history, interim, waiting, error, start, end, interrupt, send };
+  const dismissCrisis = useCallback(() => setCrisis(null), []);
+
+  return { phase, history, interim, waiting, error, crisis, dismissCrisis, start, end, interrupt, send };
 }
