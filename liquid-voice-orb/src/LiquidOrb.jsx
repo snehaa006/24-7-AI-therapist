@@ -11,6 +11,7 @@ const RINGS = 130;            // particle rings pole-to-pole (~21k particles). L
 const HIST_STEP = 1 / 45;     // seconds between history samples (wave travel speed)
 const BLOOM_BASE = 0.55;      // glow at rest
 const BLOOM_VOICE = 0.55;     // extra glow while speaking
+const BASE_DISTANCE = 5.8;    // camera distance the particle size was tuned at
 const PALETTE = {
   deep: '#0a2470',
   electric: '#2e7bff',
@@ -44,11 +45,16 @@ function buildParticleGeometry(rings) {
 /**
  * <LiquidOrb engine={audioEngine} />
  * `engine` only needs an `update(dt)` method returning { level, bass, mid, treble } in 0..1.
+ * `distance` sets the camera distance (bigger = smaller orb); changes ease in smoothly.
+ * `lift` moves the orb up by that fraction of the viewport height.
+ * `background` must match the page colour behind the canvas.
  */
-export default function LiquidOrb({ engine, className = 'orb' }) {
+export default function LiquidOrb({ engine, className = 'orb', distance = BASE_DISTANCE, lift = 0, background = '#000000' }) {
   const hostRef = useRef(null);
   const engineRef = useRef(engine);
   engineRef.current = engine;
+  const viewRef = useRef({ distance, lift });
+  viewRef.current = { distance, lift };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -58,12 +64,15 @@ export default function LiquidOrb({ engine, className = 'orb' }) {
     // renderer + post
     const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
     renderer.setPixelRatio(dpr);
-    renderer.setClearColor(0x000000, 1);
+    // The scene renders into a linear float target that OutputPass encodes to sRGB, so the
+    // clear value has to be linear for the canvas to match the CSS background.
+    renderer.setClearColor(new THREE.Color(background).convertSRGBToLinear(), 1);
     host.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 50);
-    camera.position.set(0, 0, 5.8);
+    const view = { ...viewRef.current };
+    camera.position.set(0, 0, view.distance);
 
     const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
     const composer = new EffectComposer(renderer, target);
@@ -125,15 +134,22 @@ export default function LiquidOrb({ engine, className = 'orb' }) {
     scene.add(group);
 
     // sizing
+    let viewW = 1;
+    let viewH = 1;
+    const applyView = () => {
+      camera.position.z = view.distance / Math.min(1, camera.aspect);
+      camera.setViewOffset(viewW, viewH, 0, view.lift * viewH, viewW, viewH);
+      // smaller orb on screen → finer particles so it keeps the same texture
+      const scale = Math.pow(BASE_DISTANCE / view.distance, 0.6);
+      sizeUniform.value = THREE.MathUtils.clamp((viewH / 800) * 2.6, 1.5, 3.6) * scale;
+    };
     const resize = () => {
-      const w = host.clientWidth || 1;
-      const h = host.clientHeight || 1;
-      renderer.setSize(w, h);
-      composer.setSize(w, h);
-      camera.aspect = w / h;
-      camera.position.z = 5.8 / Math.min(1, camera.aspect);
-      camera.updateProjectionMatrix();
-      sizeUniform.value = THREE.MathUtils.clamp((h / 800) * 2.6, 1.5, 3.6);
+      viewW = host.clientWidth || 1;
+      viewH = host.clientHeight || 1;
+      renderer.setSize(viewW, viewH);
+      composer.setSize(viewW, viewH);
+      camera.aspect = viewW / viewH;
+      applyView();
     };
     const ro = new ResizeObserver(resize);
     ro.observe(host);
@@ -214,6 +230,14 @@ export default function LiquidOrb({ engine, className = 'orb' }) {
         rot.vYaw *= Math.exp(-dt * 2.5);
       }
       rot.pitch += (rot.tPitch - rot.pitch) * (1 - Math.exp(-dt * 4));
+
+      const goal = viewRef.current;
+      if (Math.abs(goal.distance - view.distance) > 1e-3 || Math.abs(goal.lift - view.lift) > 1e-4) {
+        const k = 1 - Math.exp(-dt * 3);
+        view.distance += (goal.distance - view.distance) * k;
+        view.lift += (goal.lift - view.lift) * k;
+        applyView();
+      }
       group.rotation.set(rot.pitch, rot.yaw, 0);
 
       composer.render();
