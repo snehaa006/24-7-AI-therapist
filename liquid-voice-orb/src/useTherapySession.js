@@ -326,10 +326,12 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
       const ctx = actionContext();
       if (FIXED_MODE || (ctx && ctx.mode !== 'consider')) return;
       const before = historyRef.current;
-      if (earlyRef.current?.text === text && earlyRef.current.before === before) return;
+      const prev = earlyRef.current;
+      if (prev?.before === before && (prev.text === text || !prev.settled)) return; // one at a time: spares the free quota
       const promise = fetchReply([...before, { role: 'user', text }], ctx);
-      promise.catch(() => {}); // a failure is handled when (if) it's used
-      earlyRef.current = { text, before, ctx, promise };
+      const early = { text, before, ctx, promise, settled: false };
+      promise.catch(() => {}).finally(() => (early.settled = true)); // a failure is handled when (if) it's used
+      earlyRef.current = early;
     },
     // The user carried on talking before the reply started: drop it and keep listening.
     onResume: () => {

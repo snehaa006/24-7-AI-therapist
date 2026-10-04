@@ -34,6 +34,8 @@ load_dotenv()
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-2.5-flash-lite")  # fast "is the user done talking?" check
 SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-2.5-flash-lite")  # labels each message normal/crisis
+# Asked when the safety model fails (usually its quota). A different model has its own quota.
+SAFETY_FALLBACK_MODEL = os.getenv("GEMINI_SAFETY_FALLBACK_MODEL", MODEL)
 TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-2.5-flash")  # end-of-session notes and the returning greeting
 ACTION_MODEL = os.getenv("GEMINI_ACTION_MODEL", "gemini-2.5-flash-lite")  # suggest? yes/later/no? did it help?
@@ -212,7 +214,7 @@ async def chat(req: ChatRequest, tasks: BackgroundTasks):
     reply_task = background(generate_reply(contents, memory.prompt_block(req.user_id)))
     action_task = background(action_check(gemini, req)) if req.action else None
     found = None
-    if await safety.classify(gemini, SAFETY_MODEL, req.history):
+    if await safety.classify(gemini, SAFETY_MODEL, req.history, fallback=SAFETY_FALLBACK_MODEL):
         reply_task.cancel()
         if action_task:
             action_task.cancel()

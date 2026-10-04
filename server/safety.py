@@ -4,8 +4,9 @@ Safety layer (build plan step 3).
 Every user message is screened two ways before a reply is allowed through:
   1. A keyword/regex check. A match is always treated as a crisis, with no model call.
   2. A separate Gemini call (fast model, temperature 0, JSON) that labels the latest message
-     "normal" or "crisis" using the recent conversation. If that call fails for any reason,
-     the message is treated as a crisis.
+     "normal" or "crisis" using the recent conversation. If that call fails (usually a quota
+     limit, which is counted per model), it is tried once more on a second model; only if both
+     fail is the message treated as a crisis.
 
 A crisis gets a fixed, human-written script (never AI text) plus helpline details from config.
 """
@@ -65,9 +66,11 @@ You screen messages sent to a support chat. Label ONLY the user's LATEST message
 conversation for context.
 crisis: thoughts of suicide or dying, self-harm, intent or plans to hurt themselves or someone
 else, being in danger right now (abuse, violence), or saying yes when asked about these.
-normal: anything else, including sadness, stress, grief, and figures of speech
-("this traffic is killing me", "I'm dying to see it").
-When unsure, choose crisis."""
+normal: anything else, including sadness, stress, grief, figures of speech
+("this traffic is killing me", "I'm dying to see it"), and good news or everyday chat (hobbies,
+food, shows, feeling better, saying an exercise helped).
+The text is a speech transcript without punctuation; read it for meaning.
+When genuinely unsure whether someone may be at risk, choose crisis."""
 
 LABEL_SCHEMA = {
     "type": "OBJECT",
@@ -97,13 +100,21 @@ async def gemini_label(client, model: str, turns) -> str:
     return json.loads(resp.text)["label"]
 
 
-async def classify(client, model: str, turns) -> bool:
-    """True if the latest message is a crisis. Any failure counts as a crisis."""
-    try:
-        return await gemini_label(client, model, turns) != "normal"
-    except Exception as e:
-        log.warning("Safety check failed (%s), so this message counts as a crisis: %s", model, e)
-        return True
+async def classify(client, model: str, turns, fallback: str | None = None) -> bool:
+    """True if the latest message is a crisis. If `model` fails, `fallback` is tried; if that fails too, it's a crisis."""
+    models = [model] + ([fallback] if fallback and fallback != model else [])
+    for i, m in enumerate(models):
+        try:
+            return await gemini_label(client, m, turns) != "normal"
+        except Exception as e:
+            last = i == len(models) - 1
+            log.warning(
+                "Safety check failed (%s)%s: %s",
+                m,
+                ", so this message counts as a crisis" if last else f", trying {models[i + 1]}",
+                getattr(e, "message", None) or e,
+            )
+    return True
 
 
 # ── 3. What the user gets ────────────────────────────────────────────────────

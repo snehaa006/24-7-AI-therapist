@@ -66,7 +66,7 @@ The frontend has Playwright tests with the mic and speech output faked: `cd liqu
 Each user message is checked two ways, in `server/safety.py`:
 
 1. **Keywords.** A regex list (suicide, kill myself, self-harm, want to die, better off dead…). A match is always a crisis, with no model call. The list is kept tight so figures of speech ("my feet are killing me", "I'm dying to see it") don't match.
-2. **Gemini.** A separate call to a fast model (`GEMINI_SAFETY_MODEL`, temperature 0, JSON output) labels the latest message `normal` or `crisis`, using the last six turns for context, so it catches messages without keywords and understands a "yes" to "are you safe?". It runs at the same time as the reply call, so it adds no delay. **If it fails (quota, network), the message counts as a crisis.**
+2. **Gemini.** A separate call to a fast model (`GEMINI_SAFETY_MODEL`, temperature 0, JSON output) labels the latest message `normal` or `crisis`, using the last six turns for context, so it catches messages without keywords and understands a "yes" to "are you safe?". It runs at the same time as the reply call, so it adds no delay. If it fails (usually the free per-minute quota), it is asked once more on a second model (`GEMINI_SAFETY_FALLBACK_MODEL`, default `GEMINI_MODEL`), which has its own quota. **Only if both fail does the message count as a crisis.**
 
 On a crisis, the AI reply is thrown away. The app speaks a fixed script and shows a card with tap-to-call links to your helpline and emergency number. The conversation can carry on afterwards. Set the numbers in `server/.env` (`CRISIS_HELPLINE_NAME`, `CRISIS_HELPLINE_NUMBER`, `EMERGENCY_NUMBER`); without a helpline number, the card links to findahelpline.com.
 
