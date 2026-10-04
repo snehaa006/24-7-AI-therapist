@@ -10,6 +10,7 @@ Run:  uvicorn main:app --reload --port 8000
 """
 
 import asyncio
+import base64
 import hashlib
 import io
 import os
@@ -80,7 +81,8 @@ COMPAT = compat.provider(PROVIDER)
 PROVIDER_NAME = COMPAT.name if COMPAT else "Gemini"
 if COMPAT:
     # The safety label goes to the main model, not the small quick-check one: it matters most.
-    SAFETY_MODEL = SAFETY_FALLBACK_MODEL = MODEL
+    # If it fails, Gemini is asked (when a Gemini key is set): a different service, with its own limits.
+    SAFETY_MODEL = MODEL
 print(
     f"Text: {PROVIDER_NAME} ({COMPAT.model if COMPAT else MODEL}). Voices: Gemini {TTS_MODEL}."
     + ("" if COMPAT or PROVIDER == "gemini" else f" (Unknown LLM_PROVIDER={PROVIDER!r}, so using Gemini.)"),
@@ -235,7 +237,8 @@ async def chat(req: ChatRequest, tasks: BackgroundTasks):
     reply_task = background(generate_reply(contents, memory.prompt_block(req.user_id)))
     action_task = background(action_check(gemini, req)) if req.action else None
     found = None
-    if await safety.classify(gemini, SAFETY_MODEL, req.history, fallback=SAFETY_FALLBACK_MODEL):
+    backup = gemini_client() if COMPAT and keys.load_keys() else None
+    if await safety.classify(gemini, SAFETY_MODEL, req.history, fallback=SAFETY_FALLBACK_MODEL, fallback_client=backup):
         reply_task.cancel()
         if action_task:
             action_task.cancel()
@@ -525,6 +528,56 @@ async def turn(req: TurnRequest):
     except Exception as e:
         raise gemini_failed(e) from e
     return TurnResponse(complete="INCOMPLETE" not in (resp.text or "").upper())
+
+
+# ── Speech to text (Groq Whisper) ────────────────────────────────────────────
+# The browser's own speech recognition shows words live and decides when a turn ends; when a Groq key
+# is set, the turn's recorded audio is also sent here and Whisper's (more accurate) text is used.
+
+WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+_stt: keys.RotatingClient | None = None
+
+
+def stt_client() -> keys.RotatingClient | None:
+    global _stt
+    if _stt is None:
+        found = keys.load_keys("GROQ_API_KEY", also=())
+        if not found:
+            return None
+        groq = compat.provider("groq")
+        _stt = keys.RotatingClient(found, make_client=lambda api_key: compat.CompatClient(groq, api_key))
+    return _stt
+
+
+class TranscribeRequest(BaseModel):
+    audio: str = Field(max_length=14_000_000)  # base64; about 10 MB of audio
+    mime: str = Field(default="audio/webm", max_length=60)
+    lang: str = Field(default="", max_length=20)  # e.g. en-IN
+    prompt: str = Field(default="", max_length=600)  # the listener's last line, for context
+
+
+@app.get("/api/transcribe")
+def transcribe_available():
+    return {"available": bool(keys.load_keys("GROQ_API_KEY", also=())), "model": WHISPER_MODEL}
+
+
+@app.post("/api/transcribe")
+async def transcribe(req: TranscribeRequest):
+    pool = stt_client()
+    if pool is None:
+        raise HTTPException(404, "Set GROQ_API_KEY to use Whisper transcription.")
+    try:
+        audio = base64.b64decode(req.audio, validate=True)
+    except ValueError:
+        raise HTTPException(400, "Audio must be base64.")
+    if len(audio) < 1000:
+        return {"text": ""}
+    language = req.lang.split("-")[0].lower() if req.lang else ""
+    try:
+        text = await pool.run(WHISPER_MODEL, lambda c: c.transcribe(audio, req.mime, WHISPER_MODEL, language, req.prompt))
+    except Exception as e:
+        raise gemini_failed(e, "Transcription", pool) from e
+    return {"text": text}
 
 
 # ── Natural voices (Gemini text-to-speech) ───────────────────────────────────

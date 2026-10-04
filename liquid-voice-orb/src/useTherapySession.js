@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { TurnListener, prefetchSpeech, speak, stopSpeaking } from './voice.js';
 import { fetchGreeting, newSessionId, saveSession, userId } from './memory.js';
 import { askNotificationPermission, saveOutcome, stepSeconds } from './actions.js';
+import { TurnRecorder, whisperText } from './transcribe.js';
 
 const GREETING = "Hi, I'm here, and I'm listening. What's on your mind today?";
 
@@ -57,6 +58,8 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
   const sessionRef = useRef(0); // bumps on start/end
   const turnRef = useRef(0); // bumps on every new turn, start and end, so stale async work is ignored
   const listenerRef = useRef(null);
+  const recorderRef = useRef(null); // records each spoken turn for Whisper (transcribe.js)
+  if (!recorderRef.current) recorderRef.current = new TurnRecorder();
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const naturalFailedRef = useRef(false); // after one failure, use the device voice for the rest of the session
@@ -101,7 +104,21 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     listenerRef.current.setPacing(settingsRef.current.pacing);
     listenerRef.current.setLang(settingsRef.current.speechLang);
     listenerRef.current.start();
+    recorderRef.current.start(engine.micStream);
   }, [engine]);
+
+  const stopListening = () => {
+    listenerRef.current?.stop();
+    recorderRef.current?.stop();
+  };
+
+  /** The words of a spoken turn: Whisper's when it's available, else what the browser heard. */
+  const transcribe = (heard) => {
+    if (FIXED_MODE) return Promise.resolve(heard);
+    const lastAI = [...historyRef.current].reverse().find((t) => t.role === 'assistant');
+    const lang = settingsRef.current.speechLang || navigator.language || '';
+    return whisperText(recorderRef.current, heard, { lang, prompt: lastAI?.text || '' });
+  };
 
   const voiceSettings = () => {
     const s = settingsRef.current;
@@ -116,7 +133,7 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
       return speak(text, voiceSettings(), {
         onStart: (audioEl) => {
           if (turnRef.current !== turn) return;
-          listenerRef.current.stop(); // reply is playing: the user's turn is settled
+          stopListening(); // reply is playing: the user's turn is settled
           if (!inExercise) showPhase('speaking');
           if (audioEl) engine.showAudio(audioEl);
           else engine.showVoice();
@@ -152,7 +169,7 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     if (!afterSpeech && (phaseRef.current !== 'listening' || interimRef.current)) return false;
     checkinRef.current = null;
     turnRef.current++;
-    listenerRef.current.stop();
+    stopListening();
     offerRef.current = { mode: 'checkin', action: rem.action, reminder_id: rem.id };
     const line = checkinLine(rem);
     commit([...historyRef.current, { role: 'assistant', text: line }]);
@@ -205,7 +222,7 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     async ({ exercise: ex, action, action_type, reminder_id }) => {
       const run = ++runRef.current;
       turnRef.current++;
-      listenerRef.current.stop();
+      stopListening();
       runningRef.current = { action, action_type, reminder_id: reminder_id ?? null };
       pausedRef.current = false;
       const secs = stepSeconds(ex);
@@ -275,14 +292,15 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     return false;
   };
 
+  /**
+   * One user turn. `heard` is what the browser's recogniser heard; for a spoken turn the
+   * recording is transcribed by Whisper first (when available) and that text is used.
+   */
   const respond = useCallback(
-    async (text) => {
+    async (heard, { spoken = true } = {}) => {
       const turn = ++turnRef.current;
       const before = historyRef.current;
       beforeTurnRef.current = before;
-      const withUser = [...before, { role: 'user', text }];
-      commit(withUser);
-      showInterim('');
       setError('');
       showPhase('thinking');
       engine.showIdle();
@@ -290,18 +308,32 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
       const ctx = actionContext();
       const early = earlyRef.current;
       earlyRef.current = null;
-      const reuse = early && early.text === text && early.before === before && sameFlow(ctx, early.ctx);
+      const reuse = spoken && early && early.heard === heard && early.before === before && sameFlow(ctx, early.ctx);
+      let text = heard;
       let res;
-      try {
-        res = await (reuse ? early.promise : fetchReply(withUser, ctx));
-      } catch (e) {
+      let failure = null;
+      if (reuse) {
+        ({ text, res, error: failure } = await early.promise);
+      } else {
+        if (spoken) text = await transcribe(heard);
         if (turnRef.current !== turn) return;
+        commit([...before, { role: 'user', text }]);
+        showInterim('');
+        try {
+          res = await fetchReply([...before, { role: 'user', text }], ctx);
+        } catch (e) {
+          failure = e;
+        }
+      }
+      if (turnRef.current !== turn) return;
+      showInterim('');
+      const withUser = [...before, { role: 'user', text }];
+      if (failure) {
         commit(before); // drop the turn so the user can simply say it again
-        setError(e.message);
+        setError(failure.message);
         say('Sorry, I lost my connection for a moment. Could you say that again?');
         return;
       }
-      if (turnRef.current !== turn) return;
       if (res.crisis) {
         // Flagged turns are kept out of memory (step 4).
         commit([...before, { role: 'user', text, crisis: true }, { role: 'assistant', text: res.reply, crisis: true }]);
@@ -322,15 +354,21 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     // The user paused: ask for the reply now, while "are they done?" is being checked, so it's
     // ready sooner. Only when replying changes nothing on the server (no reminder or outcome is
     // saved), since the user may carry on talking and this reply would then be thrown away.
-    onPause: (text) => {
+    onPause: (heard) => {
       const ctx = actionContext();
       if (FIXED_MODE || (ctx && ctx.mode !== 'consider')) return;
       const before = historyRef.current;
       const prev = earlyRef.current;
-      if (prev?.before === before && (prev.text === text || !prev.settled)) return; // one at a time: spares the free quota
-      const promise = fetchReply([...before, { role: 'user', text }], ctx);
-      const early = { text, before, ctx, promise, settled: false };
-      promise.catch(() => {}).finally(() => (early.settled = true)); // a failure is handled when (if) it's used
+      if (prev?.before === before && (prev.heard === heard || !prev.settled)) return; // one at a time: spares the free quota
+      // Transcribe what's been said so far, then ask for the reply: { text, res } or { text, error }.
+      const promise = transcribe(heard).then((text) =>
+        fetchReply([...before, { role: 'user', text }], ctx).then(
+          (res) => ({ text, res }),
+          (error) => ({ text, error })
+        )
+      );
+      const early = { heard, before, ctx, promise, settled: false };
+      promise.finally(() => (early.settled = true));
       earlyRef.current = early;
     },
     // The user carried on talking before the reply started: drop it and keep listening.
@@ -423,7 +461,7 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     closeActions();
     sessionRef.current++;
     turnRef.current++;
-    listenerRef.current?.stop();
+    stopListening();
     stopSpeaking();
     engine.stop();
     showPhase('idle');
@@ -451,9 +489,9 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     (text) => {
       const t = text.trim();
       if (!t) return;
-      listenerRef.current?.stop();
+      stopListening();
       stopSpeaking();
-      respond(t);
+      respond(t, { spoken: false });
     },
     [respond]
   );

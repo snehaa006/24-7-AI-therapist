@@ -168,3 +168,23 @@ def test_live_gemini_labels():
         time.sleep(float(os.getenv("LIVE_TEST_DELAY", "4")))
     # Keyword hits are crisis regardless, so only misses on the others matter.
     assert not [(t, g) for t, g in wrong if not safety.keyword_crisis(t)], wrong
+
+
+def test_safety_falls_back_to_another_service(monkeypatch):
+    """Replies from Groq: if Groq's label fails, Gemini (a different client) is asked."""
+    groq, gemini, asked = object(), object(), []
+
+    async def label(client, model, turns):
+        asked.append((client, model))
+        if client is groq:
+            raise RuntimeError("Groq: Rate limit reached")
+        return "normal"
+
+    monkeypatch.setattr(safety, "gemini_label", label)
+    turns = [main.Turn(role="user", text="I have been I have I have dle ID HD")]
+    assert asyncio.run(safety.classify(groq, "m", turns, fallback="m", fallback_client=gemini)) is False
+    assert asked == [(groq, "m"), (gemini, "m")]
+
+
+def test_classifier_prompt_treats_garbled_text_as_normal():
+    assert "garbled" in safety.CLASSIFY_PROMPT and "normal" in safety.CLASSIFY_PROMPT

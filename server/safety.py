@@ -69,8 +69,10 @@ else, being in danger right now (abuse, violence), or saying yes when asked abou
 normal: anything else, including sadness, stress, grief, figures of speech
 ("this traffic is killing me", "I'm dying to see it"), and good news or everyday chat (hobbies,
 food, shows, feeling better, saying an exercise helped).
-The text is a speech transcript without punctuation; read it for meaning.
-When genuinely unsure whether someone may be at risk, choose crisis."""
+The text is a live speech transcript without punctuation, and speech recognition often mishears
+words, so it can be garbled ("I have dle ID HD"). Read it for meaning. A garbled or unclear message
+with no clear sign of risk is normal: the listener will simply ask what they meant.
+When the words do point to possible risk but you're unsure how serious, choose crisis."""
 
 LABEL_SCHEMA = {
     "type": "OBJECT",
@@ -98,20 +100,28 @@ async def gemini_label(client, model: str, turns) -> str:
     return json.loads(resp.text)["label"]
 
 
-async def classify(client, model: str, turns, fallback: str | None = None) -> bool:
-    """True if the latest message is a crisis. If `model` fails, `fallback` is tried; if that fails too, it's a crisis."""
-    models = [model] + ([fallback] if fallback and fallback != model else [])
-    for i, m in enumerate(models):
+async def classify(client, model: str, turns, fallback: str | None = None, fallback_client=None) -> bool:
+    """True if the latest message is a crisis. If `model` fails, `fallback` is tried (on `fallback_client`,
+    e.g. Gemini when replies come from Groq); if that fails too, it counts as a crisis."""
+    tries = [(client, model)]
+    other = fallback_client or client
+    if fallback and (other is not client or fallback != model):
+        tries.append((other, fallback))
+    for i, (c, m) in enumerate(tries):
         try:
-            return await gemini_label(client, m, turns) != "normal"
+            label = await gemini_label(c, m, turns)
         except Exception as e:
-            last = i == len(models) - 1
+            last = i == len(tries) - 1
             log.warning(
                 "Safety check failed (%s)%s: %s",
                 m,
-                ", so this message counts as a crisis" if last else f", trying {models[i + 1]}",
+                ", so this message counts as a crisis" if last else f", trying {tries[i + 1][1]}",
                 getattr(e, "message", None) or e,
             )
+            continue
+        if label != "normal":
+            log.warning("Safety check (%s) labelled the latest message a crisis.", m)
+        return label != "normal"
     return True
 
 

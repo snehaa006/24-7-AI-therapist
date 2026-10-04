@@ -128,3 +128,47 @@ def test_groq_key_rotation_skips_a_rate_limited_key():
     assert ask() == "from g2"
     assert ask() == "from g2"  # g1 is resting
     assert used == ["g1", "g2", "g2"]
+
+
+def test_whisper_transcription_request():
+    def handler(request):
+        assert request.url.path == "/v1/audio/transcriptions"
+        body = request.content
+        assert b'name="model"' in body and b"whisper-large-v3-turbo" in body
+        assert b'name="language"' in body and b"\r\nen\r\n" in body
+        assert b"How was your day?" in body  # the listener's question, as context
+        assert b'filename="turn.webm"' in body
+        return httpx.Response(200, json={"text": " I made pasta today. "})
+
+    text = asyncio.run(client_with(handler).transcribe(b"x" * 2000, "audio/webm;codecs=opus", "whisper-large-v3-turbo", "en", "How was your day?"))
+    assert text == "I made pasta today."
+
+
+def test_transcribe_endpoint(monkeypatch):
+    import base64
+
+    from fastapi.testclient import TestClient
+
+    import main
+
+    for k in ("GROQ_API_KEY", "GROQ_API_KEYS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(main, "_stt", None)
+    api = TestClient(main.app)
+    audio = base64.b64encode(b"x" * 2000).decode()
+    assert api.get("/api/transcribe").json()["available"] is False
+    assert api.post("/api/transcribe", json={"audio": audio}).status_code == 404
+
+    monkeypatch.setenv("GROQ_API_KEY", "g1")
+    calls = []
+
+    async def fake(self, audio, mime, model, language="", prompt=""):
+        calls.append((len(audio), language, prompt))
+        return "I made pasta today"
+
+    monkeypatch.setattr(compat.CompatClient, "transcribe", fake)
+    r = api.post("/api/transcribe", json={"audio": audio, "lang": "en-IN", "prompt": "How was your day?"})
+    assert r.json() == {"text": "I made pasta today"}
+    assert calls == [(2000, "en", "How was your day?")]
+    # too short to be speech: no call
+    assert api.post("/api/transcribe", json={"audio": base64.b64encode(b"x").decode()}).json() == {"text": ""}

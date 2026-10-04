@@ -156,10 +156,14 @@ class RotatingClient:
         model = str(kwargs.get("model", ""))
         if self._prepare and "config" in kwargs:
             kwargs["config"] = self._prepare(model, kwargs["config"])
+        return await self.run(model, lambda c: c.aio.models.generate_content(**kwargs))
+
+    async def run(self, model: str, call):
+        """`await call(client)` on the next healthy key, moving to another key when one runs out."""
         last = None
         for i in self._order(model):
             try:
-                resp = await self._client(i).aio.models.generate_content(**kwargs)
+                resp = await call(self._client(i))
             except Exception as e:
                 why = failure(e)
                 if why is None:
