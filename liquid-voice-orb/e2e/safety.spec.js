@@ -11,6 +11,7 @@ const SCRIPT = "I'm really glad you told me. Please call Test Lifeline on 0800 1
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(installFakes);
+  await page.route('**/api/reminders**', (r) => r.fulfill({ json: { reminders: [] } }));
   await page.route('**/api/turn', (r) => r.fulfill({ json: { complete: true } }));
   await page.route('**/api/session/**', (r) => r.fulfill({ json: { greeting: null, saved: 0 } }));
   await page.route('**/api/chat', async (route) => {

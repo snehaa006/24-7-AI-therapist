@@ -7,6 +7,7 @@ import { useSettings } from './settings.js';
 import { AudioEngine } from './audioEngine.js';
 import { voiceSupported } from './voice.js';
 import { FIXED_MODE, useTherapySession } from './useTherapySession.js';
+import { useReminders } from './actions.js';
 
 const BG = '#040817'; // must match --bg in styles.css (the orb canvas paints it)
 
@@ -15,7 +16,10 @@ const PHASE_LABEL = {
   speaking: 'Speaking',
   listening: 'Listening',
   thinking: 'Thinking',
+  exercise: 'Exercise',
 };
+
+const clockTime = (secs) => new Date(secs * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 function useElapsed(running) {
   const [secs, setSecs] = useState(0);
@@ -68,7 +72,7 @@ function GearButton({ onClick }) {
   );
 }
 
-function Landing({ onStart, onSettings, onMemories }) {
+function Landing({ onStart, onSettings, onMemories, due, upcoming }) {
   return (
     <section className="screen landing">
       <header className="hero">
@@ -94,6 +98,18 @@ function Landing({ onStart, onSettings, onMemories }) {
       </header>
 
       <div className="landing-foot">
+        {due ? (
+          <aside className="reminder-card" role="status">
+            <strong>It's time for {due.action}.</strong>
+            <span>Start now and we'll check in about it first.</span>
+          </aside>
+        ) : (
+          upcoming && (
+            <p className="reminder-note">
+              Reminder at {clockTime(upcoming.due_at)}: {upcoming.action}. Keep this tab open.
+            </p>
+          )
+        )}
         <ul className="chips">
           <li>Voice first</li>
           <li>No booking</li>
@@ -146,8 +162,53 @@ function CrisisCard({ resources, onClose }) {
   );
 }
 
+const mmss = (secs) => {
+  const s = Math.ceil(secs);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+/** Guided exercise: the current step, its countdown, overall progress, pause and stop. */
+function ExercisePanel({ exercise, onPause, onStop }) {
+  const { title, steps, secs, index, remaining, paused } = exercise;
+  const total = secs.reduce((a, b) => a + b, 0);
+  const done = index < 0 ? 0 : secs.slice(0, index).reduce((a, b) => a + b, 0) + (secs[index] - remaining);
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  return (
+    <section className="exercise" aria-label="Guided exercise">
+      <p className="exercise-title">{title}</p>
+      <p className="exercise-step" aria-live="polite">
+        {index < 0 ? 'Getting ready…' : steps[index].say}
+      </p>
+      <p className="exercise-timer" aria-label="Time left in this step">
+        {index < 0 ? '' : mmss(remaining)}
+      </p>
+      <div
+        className="exercise-progress"
+        role="progressbar"
+        aria-label="Exercise progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+      >
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <p className="exercise-count">
+        {index < 0 ? `${steps.length} steps` : `Step ${index + 1} of ${steps.length}`} · {mmss(Math.max(0, total - done))} left
+      </p>
+      <div className="session-actions">
+        <button className="ghost" onClick={onPause}>
+          {paused ? 'Resume' : 'Pause'}
+        </button>
+        <button className="ghost" onClick={onStop}>
+          Stop
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function Session({ session, onEnd, onSettings }) {
-  const { phase, history, interim, waiting, error, crisis, dismissCrisis, interrupt, send } = session;
+  const { phase, history, interim, waiting, error, crisis, dismissCrisis, interrupt, send, exercise } = session;
   const clock = useElapsed(true);
   const [showLog, setShowLog] = useState(false);
   const [draft, setDraft] = useState('');
@@ -181,7 +242,8 @@ function Session({ session, onEnd, onSettings }) {
           {phase === 'listening' && waiting ? 'Take your time' : PHASE_LABEL[phase]}
           {phase === 'thinking' && <span className="ellipsis" />}
         </p>
-        {!showLog && (
+        {exercise && <ExercisePanel exercise={exercise} onPause={session.pauseExercise} onStop={session.stopExercise} />}
+        {!showLog && !exercise && (
           <>
             <p className="ai-line">{lastAI?.text}</p>
             <p className="user-line">{userLine || (phase === 'listening' ? 'Go ahead, I’m listening…' : '')}</p>
@@ -190,7 +252,7 @@ function Session({ session, onEnd, onSettings }) {
         {error && <p className="error">{error}</p>}
       </div>
 
-      <footer className="session-foot">
+      <footer className="session-foot" hidden={Boolean(exercise)}>
         {crisis && <CrisisCard resources={crisis} onClose={dismissCrisis} />}
         <div className="session-actions">
           <button className="ghost" onClick={() => setShowLog((v) => !v)} aria-expanded={showLog}>
@@ -241,19 +303,33 @@ export default function App() {
   const engine = engineRef.current;
 
   const [settings, updateSettings] = useSettings();
-  const session = useTherapySession(engine, settings);
+  const remindersRef = useRef(null);
+  const session = useTherapySession(engine, settings, {
+    onRemindersChanged: () => {
+      remindersRef.current.clearDue();
+      remindersRef.current.refresh();
+    },
+  });
   const [inSession, setInSession] = useState(false);
+  const inSessionRef = useRef(false);
+  inSessionRef.current = inSession;
+  // Step 5: a reminder that comes due mid-session gets its check-in at the next pause.
+  const reminders = useReminders((rem) => inSessionRef.current && session.checkIn(rem));
+  remindersRef.current = reminders;
+  const upcoming = reminders.reminders.find((r) => r.due_at * 1000 > Date.now());
   const [showSettings, setShowSettings] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
   const openSettings = () => setShowSettings(true);
 
   const start = () => {
-    session.start(); // must run inside the gesture so speech output is allowed
+    session.start(reminders.due); // must run inside the gesture so speech output is allowed
+    reminders.clearDue();
     setInSession(true);
   };
   const end = () => {
     session.end();
     setInSession(false);
+    reminders.refresh();
   };
 
   return (
@@ -263,7 +339,13 @@ export default function App() {
       {inSession ? (
         <Session session={session} onEnd={end} onSettings={openSettings} />
       ) : (
-        <Landing onStart={start} onSettings={openSettings} onMemories={() => setShowMemories(true)} />
+        <Landing
+          onStart={start}
+          onSettings={openSettings}
+          onMemories={() => setShowMemories(true)}
+          due={reminders.due}
+          upcoming={upcoming}
+        />
       )}
       {showMemories && <MemoryPanel onClose={() => setShowMemories(false)} />}
       {showSettings && (

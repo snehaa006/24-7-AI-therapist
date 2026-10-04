@@ -1,5 +1,5 @@
 """
-Conversation backend (build plan steps 2-4).
+Conversation backend (build plan steps 2-5).
 
 The browser does speech-to-text. This server turns the conversation so far into
 the next reply, decides whether the user has finished speaking, and (for the
@@ -13,16 +13,18 @@ import asyncio
 import hashlib
 import io
 import os
+import time
 import wave
 from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import actions
 import memory
 import safety
 
@@ -33,6 +35,8 @@ TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-2.5-flash-lite")  # fast "is
 SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-2.5-flash-lite")  # labels each message normal/crisis
 TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-2.5-flash")  # end-of-session notes and the returning greeting
+ACTION_MODEL = os.getenv("GEMINI_ACTION_MODEL", "gemini-2.5-flash-lite")  # suggest? yes/later/no? did it help?
+EXERCISE_MODEL = os.getenv("GEMINI_EXERCISE_MODEL", "gemini-2.5-flash")  # writes the guided exercises
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
 SYSTEM_PROMPT = """\
@@ -78,10 +82,23 @@ def UserId(**kw):  # anonymous ids made by the browser (a UUID)
     return Field(pattern=memory.USER_ID.pattern, **kw)
 
 
+class ActionContext(BaseModel):
+    """Where the app is in the action flow (step 5), so the server knows what the user's message answers.
+    consider: nothing offered yet, a suggestion may fit. offer: the AI just suggested `action`.
+    checkin: a reminder for `action` is due and the AI asked "ready now?". feedback: they were asked how it felt."""
+
+    mode: Literal["consider", "offer", "checkin", "feedback"]
+    action: str = Field(default="", max_length=200)
+    reminder_id: int | None = None
+    done: bool = True  # feedback only: False if they stopped the exercise early
+
+
 class ChatRequest(BaseModel):
     # Full session history, oldest first, ending with the user's latest message.
     history: list[Turn] = Field(min_length=1)
     user_id: str | None = UserId(default=None)  # anonymous id from the browser; loads what's remembered about them
+    action: ActionContext | None = None
+    tz_offset: int = Field(default=0, ge=-840, le=840)  # browser's minutes ahead of UTC, for "at 6" reminders
 
 
 class ChatResponse(BaseModel):
@@ -89,6 +106,7 @@ class ChatResponse(BaseModel):
     crisis: bool = False
     speech: str | None = None  # what to say aloud, when it differs from `reply` (numbers read as digits)
     resources: dict | None = None  # helpline details for the on-screen crisis card
+    action: dict | None = None  # step 5: {type: offer | start | reminder | need_time | declined | dropped | saved, ...}
 
 
 def to_contents(history: list[Turn]) -> list[types.Content]:
@@ -132,28 +150,58 @@ def crisis_response() -> ChatResponse:
     return ChatResponse(reply=safety.script(res), speech=safety.script(res, spoken=True), crisis=True, resources=res)
 
 
+def crisis_turn(req: "ChatRequest") -> ChatResponse:
+    """A crisis drops any action in progress. Nothing the user said is stored."""
+    ctx = req.action
+    if ctx and req.user_id and ctx.action:
+        if ctx.mode == "feedback":
+            actions.record_outcome(req.user_id, ctx.action, "done" if ctx.done else "skipped", reminder_id=ctx.reminder_id)
+        elif ctx.mode == "checkin" and ctx.reminder_id is not None:
+            actions.update_reminder(req.user_id, ctx.reminder_id, status="cancelled")
+    return crisis_response()
+
+
 async def generate_reply(contents: list[types.Content], memories: str = "") -> str:
     resp = await client().aio.models.generate_content(model=MODEL, contents=contents, config=generation_config(memories))
     return (resp.text or "").strip()
 
 
+def background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())  # no "never retrieved" warning if dropped
+    return task
+
+
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, tasks: BackgroundTasks):
     if req.history[-1].role != "user":
         raise HTTPException(400, "The last turn must be the user's message.")
     # Safety first: a keyword match is a crisis, no model needed.
     if safety.keyword_crisis(req.history[-1].text):
-        return crisis_response()
+        return crisis_turn(req)
 
     contents = to_contents(req.history)
     gemini = client()  # fails early with a clear message if the key is missing
-    # The safety label and the reply are requested together so screening adds no delay.
-    reply_task = asyncio.create_task(generate_reply(contents, memory.prompt_block(req.user_id)))
-    reply_task.add_done_callback(lambda t: t.cancelled() or t.exception())  # no "never retrieved" warning if dropped
+    # The safety label, the reply and any action check are requested together so they add no delay.
+    reply_task = background(generate_reply(contents, memory.prompt_block(req.user_id)))
+    action_task = background(action_check(gemini, req)) if req.action else None
+    found = None
     if await safety.classify(gemini, SAFETY_MODEL, req.history):
         reply_task.cancel()
-        return crisis_response()
+        if action_task:
+            action_task.cancel()
+        return crisis_turn(req)
 
+    if action_task:
+        try:
+            found = await action_task
+        except Exception:
+            found = None  # an action problem never blocks the conversation
+        if found:
+            done = await action_result(gemini, req, found, tasks)
+            if done:
+                reply_task.cancel()
+                return done
     try:
         reply = await reply_task
     except HTTPException:
@@ -162,7 +210,121 @@ async def chat(req: ChatRequest):
         raise HTTPException(502, f"Gemini request failed: {e}") from e
     if not reply:
         raise HTTPException(502, "Gemini returned an empty reply.")
-    return ChatResponse(reply=reply)
+    return ChatResponse(reply=reply, action=found and found.get("event"))
+
+
+# ── Action and follow-through (step 5) ───────────────────────────────────────
+
+
+def user_words(req: ChatRequest) -> list[str]:
+    return [t.text for t in memory.safe_turns(req.history) if t.role == "user"]
+
+
+async def action_check(gemini, req: ChatRequest) -> dict | None:
+    """The fast-model call for this turn, run alongside the reply."""
+    ctx, answer = req.action, req.history[-1].text
+    if ctx.mode == "consider":
+        found = await actions.consider(gemini, ACTION_MODEL, req.user_id, req.history)
+        return {"kind": "suggest", **found} if found else None
+    if not ctx.action:
+        return None
+    if ctx.mode == "feedback":
+        return {"kind": "feedback", "helped": await actions.helped(gemini, ACTION_MODEL, ctx.action, answer)}
+    offer = next((t.text for t in reversed(req.history[:-1]) if t.role == "assistant"), ctx.action)
+    return {"kind": "decide", **await actions.decide(gemini, ACTION_MODEL, offer, answer, time.time(), req.tz_offset)}
+
+
+async def fill_exercise(gemini, user_id: str, reminder_id: int, action: str, words: list[str]):
+    """Write a later reminder's exercise after the reply has gone, so setting it is quick."""
+    exercise, _ = await actions.make_exercise(gemini, EXERCISE_MODEL, user_id, action, words)
+    actions.update_reminder(user_id, reminder_id, exercise=exercise)
+
+
+async def action_result(gemini, req: ChatRequest, found: dict, tasks: BackgroundTasks) -> ChatResponse | None:
+    """Turn the fast-model answer into a response. None: use the normal reply (with `found['event']` attached)."""
+    ctx, uid = req.action, req.user_id
+    if found["kind"] == "suggest":
+        return ChatResponse(reply=found["line"], action={"type": "offer", "action": found["action"]})
+
+    if found["kind"] == "feedback":
+        if uid:
+            status = "done" if ctx.done else "skipped"
+            saved = actions.record_outcome(uid, ctx.action, status, found["helped"], req.history[-1].text, ctx.reminder_id)
+            found["event"] = {"type": "saved", "outcome": saved}
+        return None  # the normal reply responds to how they felt
+
+    decision, rem = found["decision"], None
+    if ctx.mode == "checkin" and uid and ctx.reminder_id is not None:
+        rem = actions.get_reminder(uid, ctx.reminder_id)
+    if decision == "now":
+        exercise = rem and rem["exercise"]
+        source = "stored"
+        if not exercise:
+            exercise, source = await actions.make_exercise(gemini, EXERCISE_MODEL, uid, ctx.action, user_words(req))
+        if rem:
+            actions.update_reminder(uid, rem["id"], status="done")
+        event = {"type": "start", "action": ctx.action, "reminder_id": rem and rem["id"], "exercise": exercise, "source": source}
+        return ChatResponse(reply=exercise["intro"], action=event)
+
+    if decision == "later":
+        if not found["due_at"]:
+            return ChatResponse(reply="Sure. What time would suit you?", action={"type": "need_time", "action": ctx.action})
+        if not uid:
+            return None
+        now = time.time()
+        if rem:
+            actions.update_reminder(uid, rem["id"], due_at=found["due_at"])
+            rem = actions.get_reminder(uid, rem["id"])
+        else:
+            rem = actions.create_reminder(uid, ctx.action, found["due_at"])
+            tasks.add_task(fill_exercise, gemini, uid, rem["id"], ctx.action, user_words(req))
+        when = actions.when_text(rem["due_at"], now, req.tz_offset)
+        reply = f"Okay, I'll check in with you {when}. Keep this app open in a tab and I'll remind you."
+        public = {k: rem[k] for k in ("id", "action", "due_at")}
+        return ChatResponse(reply=reply, action={"type": "reminder", "reminder": public})
+
+    if decision == "no" and rem:
+        actions.record_outcome(uid, ctx.action, "skipped", words=req.history[-1].text, reminder_id=rem["id"])
+    found["event"] = {"type": "declined" if decision == "no" else "dropped"}
+    return None
+
+
+class ReminderOut(BaseModel):
+    id: int
+    action: str
+    due_at: float
+
+
+@app.get("/api/reminders")
+def get_reminders(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    rems = [ReminderOut(**{k: r[k] for k in ("id", "action", "due_at")}) for r in actions.pending_reminders(user_id)]
+    return {"reminders": rems, "now": time.time()}
+
+
+@app.delete("/api/reminders/{reminder_id}")
+def cancel_reminder(reminder_id: int, user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    if not actions.update_reminder(user_id, reminder_id, status="cancelled"):
+        raise HTTPException(404, "No such reminder.")
+    return {"ok": True}
+
+
+class OutcomeRequest(BaseModel):
+    user_id: str = UserId()
+    action: str = Field(min_length=1, max_length=200)
+    reminder_id: int | None = None
+    done: bool = True
+
+
+@app.post("/api/outcomes")
+def save_outcome(req: OutcomeRequest):
+    """For an exercise that ended without an answer to "how did that feel?" (e.g. the session was closed)."""
+    status = "done" if req.done else "skipped"
+    return actions.record_outcome(req.user_id, req.action, status, reminder_id=req.reminder_id)
+
+
+@app.get("/api/outcomes")
+def get_outcomes(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    return {"outcomes": actions.list_outcomes(user_id)}
 
 
 # ── Memory (step 4) ──────────────────────────────────────────────────────────

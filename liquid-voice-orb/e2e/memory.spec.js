@@ -14,6 +14,7 @@ test.beforeEach(async ({ page, context }) => {
     { id: 2, kind: 'pattern', text: 'Gets nervous before big events.' },
   ];
   await page.addInitScript(installFakes);
+  await page.route('**/api/reminders**', (r) => r.fulfill({ json: { reminders: [] } }));
   // Watched as requests, not routes: a sendBeacon sent while the page unloads isn't routed.
   context.on('request', (req) => {
     if (req.url().endsWith('/api/session/end') && req.resourceType() === 'fetch') calls.end.push(req.postDataJSON());

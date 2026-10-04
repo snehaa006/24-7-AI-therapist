@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     // FastAPI backend (see ../server). Keeps the Gemini key out of the browser.
-    proxy: { '/api': 'http://127.0.0.1:8000' },
+    // API_PORT lets the end-to-end test point a second dev server at a stubbed backend.
+    proxy: { '/api': `http://127.0.0.1:${process.env.API_PORT || 8000}` },
   },
 });
