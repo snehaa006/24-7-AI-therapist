@@ -474,7 +474,7 @@ async def turn(req: TurnRequest):
     prompt = f'Listener just asked: "{req.last_assistant}"\nUser has said so far: "{req.user_text}"'
     config = no_thinking(
         TURN_MODEL,
-        types.GenerateContentConfig(system_instruction=TURN_PROMPT, temperature=0, max_output_tokens=5),
+        types.GenerateContentConfig(system_instruction=TURN_PROMPT, temperature=0, max_output_tokens=20),
     )
     try:
         resp = await client().aio.models.generate_content(model=TURN_MODEL, contents=prompt, config=config)
