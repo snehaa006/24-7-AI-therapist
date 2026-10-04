@@ -181,3 +181,9 @@ def test_model_retired_for_one_key_tries_the_next():
     c = keys.RotatingClient(["a", "b"], make_client=pool)
     assert run(c) == "ok from b"
     assert c.status("m")["resting"] == 1 and c.status("other")["resting"] == 0
+
+
+def test_key_whose_account_needs_terms_acceptance_is_skipped():
+    terms = api_error(400, "Groq: The model `canopylabs/orpheus-v1-english` requires terms acceptance.")
+    c = keys.RotatingClient(["a", "b"], make_client=FakePool({"a": [terms]}))
+    assert run(c) == "ok from b"
