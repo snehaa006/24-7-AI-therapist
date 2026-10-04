@@ -606,8 +606,8 @@ VOICES = {
     "Kore", "Charon", "Aoede", "Puck", "Leda", "Zephyr", "Gacrux", "Iapetus",
 }
 
-# Kept short: the longer the audio, the longer Gemini takes to generate it. Speed is set in the app.
-TTS_STYLE = "Say warmly and naturally, like a caring friend:"
+# Only the words go to the voice model: newer ones read any instruction in front of them out loud.
+# Tone comes from the voice chosen in the app.
 
 # Generated audio is saved here, so repeated lines (greeting, previews) play instantly and cost no quota.
 TTS_CACHE = Path(__file__).parent / ".tts-cache"
@@ -632,7 +632,7 @@ def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
 async def speak(req: SpeakRequest):
     if req.voice not in VOICES:
         raise HTTPException(400, f"Unknown voice {req.voice!r}.")
-    key = hashlib.sha256(f"{TTS_MODEL}|{TTS_STYLE}|{req.voice}|{req.text}".encode()).hexdigest()
+    key = hashlib.sha256(f"{TTS_MODEL}|{req.voice}|{req.text}".encode()).hexdigest()
     cached = TTS_CACHE / f"{key}.wav"
     if cached.exists():
         return Response(content=cached.read_bytes(), media_type="audio/wav")
@@ -647,7 +647,7 @@ async def speak(req: SpeakRequest):
     )
     try:
         resp = await gemini_client().aio.models.generate_content(
-            model=TTS_MODEL, contents=f"{TTS_STYLE}\n{req.text}", config=config
+            model=TTS_MODEL, contents=req.text, config=config
         )
         data = resp.candidates[0].content.parts[0].inline_data
     except HTTPException:

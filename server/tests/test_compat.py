@@ -28,19 +28,20 @@ def test_chat_history_becomes_messages():
     ]
     config = types.GenerateContentConfig(system_instruction="Be warm.", temperature=0.9, max_output_tokens=300)
     body = compat.request_body(groq(), "gemini-2.5-flash", contents, config)
-    assert body["model"] == "llama-3.3-70b-versatile"
+    assert body["model"] == "openai/gpt-oss-120b"
     assert body["messages"] == [
         {"role": "system", "content": "Be warm."},
         {"role": "user", "content": "(opens the app)"},
         {"role": "assistant", "content": "Hi, what's on your mind?"},
         {"role": "user", "content": "work"},
     ]
-    assert body["temperature"] == 0.9 and body["max_tokens"] == 300
-    assert "reasoning_effort" not in body and "response_format" not in body
+    assert body["temperature"] == 0.9 and body["reasoning_effort"] == "low"
+    assert body["max_tokens"] == 300 + compat.REASONING_ROOM  # room for the reasoning
+    assert "response_format" not in body
 
 
 def test_quick_checks_use_the_fast_model():
-    assert compat.request_body(groq(), "gemini-2.5-flash-lite", "hi", None)["model"] == "llama-3.1-8b-instant"
+    assert compat.request_body(groq(), "gemini-2.5-flash-lite", "hi", None)["model"] == "openai/gpt-oss-20b"
 
 
 def test_groq_json_mode_puts_schema_in_the_prompt():
@@ -172,3 +173,37 @@ def test_transcribe_endpoint(monkeypatch):
     assert calls == [(2000, "en", "How was your day?")]
     # too short to be speech: no call
     assert api.post("/api/transcribe", json={"audio": base64.b64encode(b"x").decode()}).json() == {"text": ""}
+
+
+def test_retired_groq_models_in_env_are_swapped(monkeypatch):
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    monkeypatch.setenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant")
+    p = compat.provider("groq")
+    assert (p.model, p.fast_model) == ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
+
+
+def test_no_reasoning_room_when_reasoning_is_off():
+    body = compat.request_body(compat.provider("grok"), "m", "hi", types.GenerateContentConfig(max_output_tokens=20))
+    assert body["max_tokens"] == 20
+
+
+def test_voice_model_gets_only_the_words(monkeypatch, tmp_path):
+    """Newer voice models read instructions aloud, so nothing goes in front of the text."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    import main
+
+    sent = []
+
+    async def generate_content(model, contents, config):
+        sent.append(contents)
+        audio = SimpleNamespace(data=b"\0\0" * 100, mime_type="audio/L16;rate=24000")
+        return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(inline_data=audio)]))])
+
+    pool = SimpleNamespace(keys=["k"], aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    monkeypatch.setattr(main, "gemini_client", lambda: pool)
+    monkeypatch.setattr(main, "TTS_CACHE", tmp_path)
+    r = TestClient(main.app).post("/api/speak", json={"text": "Hi, I'm here.", "voice": "Sulafat"})
+    assert r.status_code == 200 and sent == ["Hi, I'm here."]
