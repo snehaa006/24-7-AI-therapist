@@ -8,6 +8,9 @@ app asks how it felt and saves the outcome, to inform future suggestions.
 
 Every decision (suggest or not; yes / later / no; did it help) is a small JSON call to a fast
 model, never a regex. Nothing here runs on a crisis turn.
+
+Step 6: every reminder and outcome has a type (feedback.TYPES). The type to suggest is picked in
+code from how each type went (feedback.py); Gemini writes the wording and the exercise for it.
 """
 
 import json
@@ -18,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from google.genai import types
 
+import feedback
 import memory
 import safety
 
@@ -28,6 +32,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
     action TEXT NOT NULL,
+    type TEXT,                    -- feedback.TYPES key (step 6)
     exercise TEXT,                -- JSON, filled in once generated
     due_at REAL NOT NULL,         -- unix seconds
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'skipped', 'cancelled')),
@@ -39,6 +44,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
     user_id TEXT NOT NULL,
     reminder_id INTEGER,
     action TEXT NOT NULL,
+    type TEXT,                    -- feedback.TYPES key (step 6)
     status TEXT NOT NULL CHECK (status IN ('done', 'skipped')),
     helped TEXT CHECK (helped IN ('yes', 'no', 'somewhat', 'unknown')),
     words TEXT NOT NULL DEFAULT '',
@@ -50,11 +56,32 @@ CREATE INDEX IF NOT EXISTS outcomes_user ON outcomes (user_id);
 MAX_AHEAD = 7 * 24 * 3600  # reminders further out than a week are refused
 
 
+_migrated: set[str] = set()  # databases already checked this run
+
+
+def migrate(conn) -> None:
+    """Step 5 databases have no `type` column: add it, and label the old rows once, by keywords."""
+    for table in ("reminders", "outcomes"):
+        if "type" in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN type TEXT")
+        rows = conn.execute(f"SELECT id, action FROM {table}").fetchall()
+        conn.executemany(f"UPDATE {table} SET type = ? WHERE id = ?", [(feedback.label(r["action"]), r["id"]) for r in rows])
+
+
 @contextmanager
 def db():
     with memory.db() as conn:
         conn.executescript(SCHEMA)
+        if str(memory.DB_PATH) not in _migrated:
+            migrate(conn)
+            _migrated.add(str(memory.DB_PATH))
         yield conn
+
+
+def type_of(action: str, action_type: str | None) -> str:
+    """A stored type for an action: the one given if it's on the list, else by keywords."""
+    return feedback.valid(action_type) or feedback.label(action)
 
 
 def _reminder(row) -> dict:
@@ -63,11 +90,13 @@ def _reminder(row) -> dict:
     return r
 
 
-def create_reminder(user_id: str, action: str, due_at: float, exercise: dict | None = None) -> dict:
+def create_reminder(
+    user_id: str, action: str, due_at: float, exercise: dict | None = None, action_type: str | None = None
+) -> dict:
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO reminders (user_id, action, exercise, due_at, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, action, json.dumps(exercise) if exercise else None, due_at, time.time()),
+            "INSERT INTO reminders (user_id, action, type, exercise, due_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, action, type_of(action, action_type), json.dumps(exercise) if exercise else None, due_at, time.time()),
         )
         rid = cur.lastrowid
     return get_reminder(user_id, rid)
@@ -107,9 +136,16 @@ HELPED_NOTE = {
 
 
 def record_outcome(
-    user_id: str, action: str, status: str, helped: str | None = None, words: str = "", reminder_id: int | None = None
+    user_id: str,
+    action: str,
+    status: str,
+    helped: str | None = None,
+    words: str = "",
+    reminder_id: int | None = None,
+    action_type: str | None = None,
 ) -> dict:
-    """Save how an action went, close its reminder, and add a note to memory (for future suggestions)."""
+    """Save how an action went, close its reminder, and add a note to memory (for future suggestions).
+    status 'skipped' with no `helped`: planned but not done. With `helped`: started, then stopped early."""
     words = words.strip()[:500]
     if safety.keyword_crisis(words):
         words = ""  # crisis content is never stored
@@ -117,11 +153,15 @@ def record_outcome(
         helped = helped if helped in HELPED_NOTE else "unknown"
     elif helped not in HELPED_NOTE:
         helped = None
+    if not feedback.valid(action_type) and reminder_id is not None and (rem := get_reminder(user_id, reminder_id)):
+        action_type = rem["type"]
+    action_type = type_of(action, action_type)
     now = time.time()
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO outcomes (user_id, reminder_id, action, status, helped, words, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, reminder_id, action, status, helped, words, now),
+            "INSERT INTO outcomes (user_id, reminder_id, action, type, status, helped, words, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, reminder_id, action, action_type, status, helped, words, now),
         )
         oid = cur.lastrowid
         if reminder_id is not None:
@@ -138,30 +178,43 @@ def record_outcome(
     if words:
         note += f' They said: "{words[:120]}"'
     memory.add_note(user_id, note, kind="pattern")
-    return {"id": oid, "action": action, "status": status, "helped": helped, "words": words, "reminder_id": reminder_id}
+    return {
+        "id": oid,
+        "action": action,
+        "type": action_type,
+        "status": status,
+        "helped": helped,
+        "words": words,
+        "reminder_id": reminder_id,
+    }
 
 
 def list_outcomes(user_id: str, limit: int = 20) -> list[dict]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, reminder_id, action, status, helped, words, created_at FROM outcomes "
+            "SELECT id, reminder_id, action, type, status, helped, words, created_at FROM outcomes "
             "WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def outcomes_block(user_id: str | None, limit: int = 5) -> str:
-    """Recent actions and how they went, for the suggestion and exercise prompts."""
-    if not user_id:
-        return ""
-    lines = []
-    for o in list_outcomes(user_id, limit):
-        how = HELPED_NOTE.get(o["helped"] or "", "")
-        if o["status"] != "done":
-            how = f"stopped early, {how}" if how else "skipped"
-        lines.append(f"- {o['action']}: {how}" + (f' ("{o["words"][:80]}")' if o["words"] else ""))
-    return "Actions tried before:\n" + "\n".join(lines) if lines else ""
+def user_stats(user_id: str | None) -> dict[str, dict]:
+    """Per-type stats (feedback.stats) from everything this person has tried."""
+    return feedback.stats(list_outcomes(user_id, 1000) if user_id else [])
+
+
+_OUTCOME_NOTE = re.compile(r"^(Tried|Started|Planned) ")
+
+
+def reset_outcomes(user_id: str) -> int:
+    """Forget what helped: the outcomes and the memory notes made from them. Reminders stay."""
+    with db() as conn:
+        n = conn.execute("DELETE FROM outcomes WHERE user_id = ?", (user_id,)).rowcount
+    for m in memory.list_memories(user_id):
+        if m["kind"] == "pattern" and _OUTCOME_NOTE.match(m["text"]):
+            memory.delete_memory(user_id, m["id"])
+    return n
 
 
 # ── Exercises ────────────────────────────────────────────────────────────────
@@ -274,14 +327,14 @@ No food or fasting, no hard exercise, no driving, nothing medical.
 Plain spoken sentences: no lists, markdown or emojis."""
 
 
-def exercise_input(user_id: str | None, action: str, words: list[str]) -> str:
-    parts = [f"Exercise: {action}"]
+def exercise_input(user_id: str | None, action: str, words: list[str], action_type: str | None = None) -> str:
+    parts = [f"Exercise: {action} (type: {type_of(action, action_type)})"]
+    if tried := feedback.history_line(user_stats(user_id)):
+        parts.append(tried)
     if words:
         parts.append("They just said:\n" + "\n".join(f"- {w[:300]}" for w in words[-3:]))
     if mems := memory.prompt_block(user_id).strip():
         parts.append(mems)
-    if tried := outcomes_block(user_id):
-        parts.append(tried)
     return "\n\n".join(parts)
 
 
@@ -308,9 +361,11 @@ async def gemini_exercise(client, model: str, prompt: str) -> dict:
     return await _json_call(client, model, EXERCISE_PROMPT, prompt, EXERCISE_SCHEMA, max_tokens=1500, temperature=0.8)
 
 
-async def make_exercise(client, model: str, user_id: str | None, action: str, words: list[str]) -> tuple[dict, str]:
+async def make_exercise(
+    client, model: str, user_id: str | None, action: str, words: list[str], action_type: str | None = None
+) -> tuple[dict, str]:
     """A validated exercise for `action`. Tries Gemini twice, then the built-in one. → (exercise, 'gemini'|'fallback')"""
-    prompt = exercise_input(user_id, action, words)
+    prompt = exercise_input(user_id, action, words, action_type)
     for _ in range(2):
         try:
             clean, _errors = validate_exercise(await gemini_exercise(client, model, prompt))
@@ -326,28 +381,33 @@ async def make_exercise(client, model: str, user_id: str | None, action: str, wo
 SUGGEST_PROMPT = """\
 You help a supportive listener decide whether to suggest ONE small action right now.
 Suggest only if the person has said what's weighing on them and a small 3 to 6 minute thing
-they can do where they are could help (a short walk, slow breathing, a song they love,
-stretching, writing a few lines). Not if they're mid-story or asked for something else.
-Prefer what helped them before and what they enjoy; avoid what didn't help.
+they can do where they are could help. Not if they're mid-story or asked for something else.
+The action must be of the given type; shape it to them (their words, what they enjoy).
 Nothing intense, medical, about food, or involving driving.
+type: the given type.
 action: a short phrase, e.g. "a five-minute walk with your favourite music".
 line: one or two warm spoken sentences: briefly reflect what they said, then ask if they'd
 like to try it. If suggest is false, leave action and line empty."""
 
 SUGGEST_SCHEMA = {
     "type": "OBJECT",
-    "properties": {"suggest": {"type": "BOOLEAN"}, "action": {"type": "STRING"}, "line": {"type": "STRING"}},
-    "required": ["suggest", "action", "line"],
+    "properties": {
+        "suggest": {"type": "BOOLEAN"},
+        "type": {"type": "STRING", "enum": list(feedback.TYPES)},
+        "action": {"type": "STRING"},
+        "line": {"type": "STRING"},
+    },
+    "required": ["suggest", "type", "action", "line"],
 }
 
 MIN_USER_TURNS = 2  # let them say what's going on before anything is suggested
 
 
-def suggest_input(user_id: str | None, turns) -> str:
+def suggest_input(user_id: str | None, turns, action_type: str, history: str = "") -> str:
     recent = [t for t in turns if t.text.strip()][-6:]
     talk = "\n".join(f"{'User' if t.role == 'user' else 'Listener'}: {t.text.strip()}" for t in recent)
-    parts = [p for p in (memory.prompt_block(user_id).strip(), outcomes_block(user_id)) if p]
-    return "\n\n".join([*parts, f"Conversation:\n{talk}"])
+    parts = [f"Type: {action_type}", history, memory.prompt_block(user_id).strip()]
+    return "\n\n".join([*(p for p in parts if p), f"Conversation:\n{talk}"])
 
 
 async def gemini_suggest(client, model: str, prompt: str) -> dict:
@@ -355,19 +415,22 @@ async def gemini_suggest(client, model: str, prompt: str) -> dict:
 
 
 async def consider(client, model: str, user_id: str | None, turns) -> dict | None:
-    """{action, line} if now is a good moment to suggest something, else None. Failures mean no suggestion."""
+    """{action, line, action_type} if now is a good moment to suggest something, else None.
+    The type is chosen here from what helped before; failures mean no suggestion."""
     if sum(t.role == "user" for t in turns) < MIN_USER_TURNS or any(t.crisis for t in turns):
         return None
+    st = user_stats(user_id)
+    chosen = feedback.choose(st)
     try:
-        out = await gemini_suggest(client, model, suggest_input(user_id, turns))
+        out = await gemini_suggest(client, model, suggest_input(user_id, turns, chosen, feedback.history_line(st)))
     except Exception:
         return None
     action, line = (out.get("action") or "").strip(), (out.get("line") or "").strip()
-    if not out.get("suggest") or not action or not line or len(action) > 120 or len(line) > 400:
+    if not out.get("suggest") or out.get("type") != chosen or not action or not line or len(action) > 120 or len(line) > 400:
         return None
     if risky(action) or risky(line) or _NOT_PLAIN.search(line):
         return None
-    return {"action": action, "line": line}
+    return {"action": action, "line": line, "action_type": chosen}
 
 
 # ── Their answer: now, later (when?), or no (fast model) ─────────────────────

@@ -1,15 +1,16 @@
 import { expect, test } from '@playwright/test';
 import { installFakes } from './fakes.js';
 
-const ACTION = 'a five-minute walk with your favourite music';
-const SUGGESTION = 'That sounds like a lot. Want to try a five-minute walk with your favourite music?';
+// A new user: nothing tried yet, so the first type on the list (breathing) is suggested (step 6).
+const ACTION = 'a few minutes of slow breathing';
+const SUGGESTION = 'That sounds like a lot. Want to try a few minutes of slow breathing?';
 const CHECKIN = `It's time for ${ACTION}, like we planned. Ready to do it now?`;
 const STEPS = [
-  'Put on a song you love and stand up slowly.',
-  'Start walking at an easy pace, letting your arms swing.',
-  'Notice three things you can see as you walk.',
-  'Let your breath slow down to match your steps.',
-  'Slow down and come to a gentle stop.',
+  'Sit comfortably and let your shoulders drop.',
+  'Breathe in for four, and out for six.',
+  'Keep that slow rhythm going.',
+  'Notice the air, cool on the way in.',
+  'Let your breathing settle back to normal.',
 ];
 
 const listening = (page) => expect(page.getByText('Listening', { exact: true })).toBeVisible();
@@ -62,7 +63,7 @@ test.describe('full stack', () => {
     // Yes: the guided exercise runs, each step spoken, with the mic paused.
     await say(page, "yes, let's do it now");
     const panel = page.getByRole('region', { name: 'Guided exercise' });
-    await expect(panel.getByText('Walk with your music')).toBeVisible();
+    await expect(panel.getByText('Slow breathing')).toBeVisible();
     await expect(panel.getByText('Step 1 of 5')).toBeVisible();
     await expect(panel.locator('.exercise-step')).toHaveText(STEPS[0]);
     await expect(panel.getByRole('progressbar')).toBeVisible();
@@ -72,7 +73,7 @@ test.describe('full stack', () => {
     expect(await page.evaluate(() => window.__rec)).toBeNull();
 
     // Afterwards: "How did that feel?", and the mic is back on.
-    await expect(page.locator('.ai-line')).toHaveText('Nice work. Take a moment before you sit back down. How did that feel?', {
+    await expect(page.locator('.ai-line')).toHaveText('Well done. Take a moment before you carry on. How did that feel?', {
       timeout: 30_000,
     });
     await expect(panel).toHaveCount(0);
@@ -86,7 +87,7 @@ test.describe('full stack', () => {
     // The outcome is saved, in SQLite and in memory, and the reminder is used up.
     await expect.poll(async () => (await api('/api/outcomes')).outcomes.length).toBe(1);
     const [outcome] = (await api('/api/outcomes')).outcomes;
-    expect(outcome).toMatchObject({ action: ACTION, status: 'done', helped: 'yes', words: 'I feel a bit lighter, better actually' });
+    expect(outcome).toMatchObject({ action: ACTION, type: 'breathing', status: 'done', helped: 'yes', words: 'I feel a bit lighter, better actually' });
     expect(outcome.reminder_id).toBe(reminders[0].id);
     const { memories } = await api('/api/memories');
     expect(memories.map((m) => m.text)).toContain(`Tried ${ACTION}: it helped. They said: "I feel a bit lighter, better actually"`);

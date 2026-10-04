@@ -1,11 +1,13 @@
 """
-Backend for the Playwright step 5 test (liquid-voice-orb/e2e/actions.spec.js): the real app,
-with a throwaway SQLite database and every Gemini call stubbed with canned, rule-based answers.
+Backend for the Playwright full-stack tests (liquid-voice-orb/e2e/actions.spec.js, feedback.spec.js):
+the real app, with a throwaway SQLite database and every Gemini call stubbed with canned, rule-based
+answers. Like the real model, the stubs keep to the action type the server picked.
 
     python tests/e2e_server.py 8011
 """
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -21,7 +23,7 @@ import main  # noqa: E402
 import memory  # noqa: E402
 import safety  # noqa: E402
 
-EXERCISE = {
+WALK = {
     "title": "Walk with your music",
     "intro": "Let's do a short walk with that playlist you love.",
     "steps": [
@@ -32,6 +34,26 @@ EXERCISE = {
         {"say": "Slow down and come to a gentle stop.", "seconds": 20},
     ],
     "closing": "Nice work. Take a moment before you sit back down.",
+}
+BREATHING = {
+    "title": "Slow breathing",
+    "intro": "Let's slow your breathing down together.",
+    "steps": [
+        {"say": "Sit comfortably and let your shoulders drop.", "seconds": 30},
+        {"say": "Breathe in for four, and out for six.", "seconds": 60},
+        {"say": "Keep that slow rhythm going.", "seconds": 45},
+        {"say": "Notice the air, cool on the way in.", "seconds": 45},
+        {"say": "Let your breathing settle back to normal.", "seconds": 20},
+    ],
+    "closing": "Well done. Take a moment before you carry on.",
+}
+EXERCISES = {"walk": WALK, "breathing": BREATHING}
+SUGGESTIONS = {  # type → (action, line)
+    "breathing": ("a few minutes of slow breathing", "That sounds like a lot. Want to try a few minutes of slow breathing?"),
+    "walk": (
+        "a five-minute walk with your favourite music",
+        "That sounds like a lot. Want to try a five-minute walk with your favourite music?",
+    ),
 }
 
 
@@ -44,11 +66,9 @@ async def reply(contents, memories=""):
 
 
 async def suggest(client, model, prompt):
-    return {
-        "suggest": True,
-        "action": "a five-minute walk with your favourite music",
-        "line": "That sounds like a lot. Want to try a five-minute walk with your favourite music?",
-    }
+    kind = re.search(r"^Type: (\w+)", prompt, re.M)[1]
+    action, line = SUGGESTIONS.get(kind, (f"a little {kind}", f"Want to try a little {kind}?"))
+    return {"suggest": True, "type": kind, "action": action, "line": line}
 
 
 async def decide(client, model, prompt):
@@ -63,11 +83,14 @@ async def decide(client, model, prompt):
 
 
 async def helped(client, model, prompt):
-    return "yes" if any(w in prompt.lower() for w in ("better", "calmer", "lighter")) else "somewhat"
+    answer = prompt.lower()
+    if "didn't help" in answer or "worse" in answer:
+        return "no"
+    return "yes" if any(w in answer for w in ("better", "calmer", "lighter")) else "somewhat"
 
 
 async def exercise(client, model, prompt):
-    return EXERCISE
+    return EXERCISES.get(re.search(r"\(type: (\w+)\)", prompt)[1], WALK)
 
 
 async def extract(client, model, known, turns):
