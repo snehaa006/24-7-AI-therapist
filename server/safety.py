@@ -5,8 +5,8 @@ Every user message is screened two ways before a reply is allowed through:
   1. A keyword/regex check. A match is always treated as a crisis, with no model call.
   2. A separate Gemini call (fast model, temperature 0, JSON) that labels the latest message
      "normal" or "crisis" using the recent conversation. If that call fails (usually a quota
-     limit, which is counted per model), it is tried once more on a second model; only if both
-     fail is the message treated as a crisis.
+     limit, which is counted per model), it is tried once more on a second model. If both fail,
+     a much broader word list decides: any risk word means crisis, otherwise normal.
 
 A crisis gets a fixed, human-written script (never AI text) plus helpline details from config.
 """
@@ -72,6 +72,8 @@ food, shows, feeling better, saying an exercise helped).
 The text is a live speech transcript without punctuation, and speech recognition often mishears
 words, so it can be garbled ("I have dle ID HD"). Read it for meaning. A garbled or unclear message
 with no clear sign of risk is normal: the listener will simply ask what they meant.
+Everyday stress is normal too: deadlines, exams, a demanding boss, not being able to focus,
+feeling overwhelmed, asking "what should I do?".
 When the words do point to possible risk but you're unsure how serious, choose crisis."""
 
 LABEL_SCHEMA = {
@@ -97,12 +99,44 @@ async def gemini_label(client, model: str, turns) -> str:
         response_schema=LABEL_SCHEMA,
     )
     resp = await client.aio.models.generate_content(model=model, contents=classifier_input(turns), config=config)
-    return json.loads(resp.text)["label"]
+    return parse_label(resp.text or "")
+
+
+def parse_label(text: str) -> str:
+    """'normal' or 'crisis' from the model's answer. Some models wrap the JSON in prose or code fences."""
+    try:
+        label = str(json.loads(text)["label"]).strip().lower()
+    except (ValueError, KeyError, TypeError):
+        m = re.search(r'"label"\s*:\s*"(\w+)"', text) or re.search(r"\b(crisis|normal)\b", text, re.I)
+        if not m:
+            raise ValueError(f"No label in the answer: {text[:80]!r}")
+        label = m.group(1).lower()
+    if label not in ("normal", "crisis"):
+        raise ValueError(f"Unknown label {label!r}")
+    return label
+
+
+# When no safety model can be reached (quota, outage, a retired model), the message still gets a
+# check: this much broader list than _PATTERNS. Any match counts as a crisis, as before; with no
+# match the message is treated as normal, so a technical problem doesn't give everyone the crisis card.
+_RISK_WORDS = re.compile(
+    r"\b(die|dying|died|dead|death|kill\w*|suicid\w*|hurt\w*|harm\w*|cut(ting)? (my|me)|overdos\w*|pills?"
+    r"|end (it|my|everything)|give up on (life|everything)|no point|hopeless|can'?t (go on|take (it|this) anymore)"
+    r"|disappear|not (be )?here anymore|gone forever|unsafe|danger\w*|abus\w*|hits? me|beat(s|ing)? me|threat\w*"
+    r"|weapon|gun|knife|rope|jump(ing)? (off|from)|bridge|goodbye (letters?|notes?|forever)|unalive\w*"
+    r"|(cutting|hurting|harming|burning|starving) myself|hang(ing|ed)? myself|(end|ending|take|taking|took) (my|my own) life"
+    r"|better off without|(want|wanna|reason|point) to (live|be alive)|giving (my |all my )?(things|stuff|belongings) away"
+    r"|(never|not) wake up|burden to (everyone|you|them))\b"
+)
+
+
+def risk_words(text: str) -> bool:
+    return keyword_crisis(text) or bool(_RISK_WORDS.search(_normalise(text)))
 
 
 async def classify(client, model: str, turns, fallback: str | None = None, fallback_client=None) -> bool:
     """True if the latest message is a crisis. If `model` fails, `fallback` is tried (on `fallback_client`,
-    e.g. Gemini when replies come from Groq); if that fails too, it counts as a crisis."""
+    e.g. Gemini when replies come from Groq); if that fails too, the broad risk-word list decides."""
     tries = [(client, model)]
     other = fallback_client or client
     if fallback and (other is not client or fallback != model):
@@ -122,7 +156,12 @@ async def classify(client, model: str, turns, fallback: str | None = None, fallb
         if label != "normal":
             log.warning("Safety check (%s) labelled the latest message a crisis.", m)
         return label != "normal"
-    return True
+    latest = next((t.text for t in reversed(turns) if t.role == "user"), "")
+    if risk_words(latest):
+        log.warning("No safety model answered and the message has risk words, so it counts as a crisis.")
+        return True
+    log.warning("No safety model answered; the message has no risk words, so it's treated as normal.")
+    return False
 
 
 # ── 3. What the user gets ────────────────────────────────────────────────────

@@ -33,15 +33,34 @@ import safety
 
 load_dotenv()
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-3.5-flash-lite")  # fast "is the user done talking?" check
-SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-3.5-flash-lite")  # labels each message normal/crisis
+# Gemini models that new API keys can no longer use (404 "no longer available to new users"), and what
+# replaces them. An old .env naming one still works: it's swapped at startup, with a note in the terminal.
+RETIRED = {
+    "gemini-2.5-flash": "gemini-3.8-flash",
+    "gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-preview-tts": "gemini-3.8-flash-tts",
+    "gemini-2.0-flash": "gemini-3.8-flash",
+    "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
+}
+
+
+def model_setting(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip() or default
+    if value in RETIRED and os.getenv("GEMINI_KEEP_RETIRED") != "1":
+        print(f"{name}={value} doesn't work with new API keys, so using {RETIRED[value]}. (Change it in .env to hide this.)", flush=True)
+        return RETIRED[value]
+    return value
+
+
+MODEL = model_setting("GEMINI_MODEL", "gemini-3.8-flash")
+TURN_MODEL = model_setting("GEMINI_TURN_MODEL", "gemini-3.5-flash-lite")  # fast "is the user done talking?" check
+SAFETY_MODEL = model_setting("GEMINI_SAFETY_MODEL", "gemini-3.5-flash-lite")  # labels each message normal/crisis
 # Asked when the safety model fails (usually its quota). A different model has its own quota.
-SAFETY_FALLBACK_MODEL = os.getenv("GEMINI_SAFETY_FALLBACK_MODEL", MODEL)
-TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")
-MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-3.8-flash")  # end-of-session notes and the returning greeting
-ACTION_MODEL = os.getenv("GEMINI_ACTION_MODEL", "gemini-3.5-flash-lite")  # suggest? yes/later/no? did it help?
-EXERCISE_MODEL = os.getenv("GEMINI_EXERCISE_MODEL", "gemini-3.8-flash")  # writes the guided exercises
+SAFETY_FALLBACK_MODEL = model_setting("GEMINI_SAFETY_FALLBACK_MODEL", MODEL)
+TTS_MODEL = model_setting("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")
+MEMORY_MODEL = model_setting("GEMINI_MEMORY_MODEL", "gemini-3.8-flash")  # end-of-session notes and the returning greeting
+ACTION_MODEL = model_setting("GEMINI_ACTION_MODEL", "gemini-3.5-flash-lite")  # suggest? yes/later/no? did it help?
+EXERCISE_MODEL = model_setting("GEMINI_EXERCISE_MODEL", "gemini-3.8-flash")  # writes the guided exercises
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
 SYSTEM_PROMPT = """\

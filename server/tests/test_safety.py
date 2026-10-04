@@ -87,12 +87,38 @@ def test_gemini_crisis_label_drops_the_reply(api):
     assert not state["reply_done"], "the reply call should be cancelled"
 
 
-def test_gemini_failure_counts_as_crisis(api):
-    """Both the safety model and its fallback fail: the message counts as a crisis."""
+def test_no_safety_model_and_risk_words_counts_as_crisis(api):
+    """Both the safety model and its fallback fail: any risk word still means a crisis."""
     client, state = api
     state["label"] = RuntimeError("quota exceeded")
-    assert say(client, "I had an okay day I guess")["crisis"] is True
+    assert say(client, "honestly I feel hopeless lately")["crisis"] is True
     assert sum(c[0] == "label" for c in state["calls"]) == 2
+
+
+def test_no_safety_model_and_no_risk_words_gets_a_normal_reply(api):
+    """A technical problem doesn't give an ordinary message the crisis card."""
+    client, state = api
+    state["label"] = RuntimeError("quota exceeded")
+    body = say(client, "I have to submit reports tomorrow and I can't focus with 15 tabs open")
+    assert body["crisis"] is False and body["reply"] == state["reply"]
+
+
+@pytest.mark.parametrize("text", CRISIS + CRISIS_INDIRECT)
+def test_every_crisis_phrase_hits_the_risk_words(text):
+    assert safety.risk_words(text)
+
+
+@pytest.mark.parametrize(
+    "answer,label",
+    [('{"label": "normal"}', "normal"), ('```json\n{"label":"crisis"}\n```', "crisis"), ("Label: NORMAL", "normal")],
+)
+def test_label_parsing_is_lenient(answer, label):
+    assert safety.parse_label(answer) == label
+
+
+def test_unreadable_label_is_an_error():
+    with pytest.raises(ValueError):
+        safety.parse_label("I can't help with that")
 
 
 def test_safety_model_failure_falls_back_to_second_model(monkeypatch):
