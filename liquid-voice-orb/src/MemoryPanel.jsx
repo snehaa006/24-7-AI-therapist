@@ -1,11 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { deleteMemory, fetchMemories, forgetAll } from './memory.js';
+import { fetchStats, resetStats } from './actions.js';
 
-/** Bottom sheet listing what's remembered from past sessions, with delete. */
+const DAY = 24 * 3600 * 1000;
+
+/** 'today', 'yesterday', '3 days ago', '2 weeks ago'. */
+function ago(seconds) {
+  const days = Math.floor((Date.now() - seconds * 1000) / DAY);
+  if (days < 1) return 'today';
+  if (days < 2) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  return `${Math.floor(days / 7)} weeks ago`;
+}
+
+/** Bottom sheet listing what's remembered from past sessions, with delete, and what has helped (step 6). */
 export default function MemoryPanel({ onClose }) {
   const [data, setData] = useState(null); // { memories: [{ id, kind, text }], last_summary }
+  const [helps, setHelps] = useState([]); // action types with any history, best first
   const [error, setError] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [confirmingReset, setConfirmingReset] = useState(false);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -14,8 +28,14 @@ export default function MemoryPanel({ onClose }) {
       .then(setData)
       .catch((e) => setError(`Couldn't load memories. (${e.message})`));
 
+  const loadHelps = () =>
+    fetchStats()
+      .then((d) => setHelps((d.types || []).filter((t) => t.tries || t.skipped || t.stopped)))
+      .catch(() => setHelps([])); // the memories still show
+
   useEffect(() => {
     load();
+    loadHelps();
     const onKey = (e) => e.key === 'Escape' && closeRef.current();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -42,11 +62,23 @@ export default function MemoryPanel({ onClose }) {
     }
   };
 
+  const reset = async () => {
+    setError('');
+    try {
+      await resetStats();
+      setHelps([]);
+      setConfirmingReset(false);
+      load(); // the notes about past exercises go too
+    } catch (e) {
+      setError(`Couldn't reset that. (${e.message})`);
+    }
+  };
+
   const groups = [
     ['fact', 'Things you’ve shared'],
     ['pattern', 'Patterns'],
   ];
-  const empty = data && !data.memories.length && !data.last_summary;
+  const empty = data && !data.memories.length && !data.last_summary && !helps.length;
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
@@ -93,7 +125,29 @@ export default function MemoryPanel({ onClose }) {
             );
           })}
 
-        {data && !empty && (
+        {helps.length > 0 && (
+          <section aria-label="What helps">
+            <h3>What helps</h3>
+            <ul className="memory-list helps-list">
+              {helps.map((t) => (
+                <li key={t.type}>
+                  <span>
+                    {t.label} – {t.summary}
+                  </span>
+                  {t.last_tried && <span className="helps-when">{ago(t.last_tried)}</span>}
+                </li>
+              ))}
+            </ul>
+            <button
+              className={`link-button${confirmingReset ? ' danger' : ''}`}
+              onClick={confirmingReset ? reset : () => setConfirmingReset(true)}
+            >
+              {confirmingReset ? 'Tap again to reset what helps' : 'Reset what helps'}
+            </button>
+          </section>
+        )}
+
+        {data && (data.memories.length > 0 || data.last_summary) && (
           <button className={`preview${confirming ? ' danger' : ''}`} onClick={confirming ? wipe : () => setConfirming(true)}>
             {confirming ? 'Tap again to forget everything' : 'Forget everything'}
           </button>

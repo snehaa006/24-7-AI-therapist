@@ -805,6 +805,38 @@ input {
   background: #ffb4c8;
 }
 
+/* "What helps" (step 6) */
+.helps-list li {
+  align-items: baseline;
+}
+
+.helps-when {
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.link-button {
+  margin-top: 4px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button.danger {
+  color: #ffb4c8;
+}
+
+.link-button:focus-visible {
+  outline: 2px solid #9fd8ff;
+  outline-offset: 2px;
+}
+
 /* ── action and follow-through (step 5) ──────────────────────────────────── */
 .session-foot[hidden] {
   display: none;

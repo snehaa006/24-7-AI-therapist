@@ -1,12 +1,13 @@
 # 24-7-AI-therapist
 
-A voice-first AI companion you can talk to any time. This build covers **steps 1 to 5** of the plan:
+A voice-first AI companion you can talk to any time. This build covers **steps 1 to 6** of the plan:
 
 1. **Voice loop.** Mic → speech-to-text → reply → spoken output (browser Web Speech API).
 2. **Real conversation.** Replies come from Gemini with a system prompt (listen, reflect, ask one follow-up, no advice lists). The whole session history is sent each turn.
 3. **Safety.** Every message is screened for crisis signs. A crisis gets a fixed, human-written message (not AI) and an on-screen card with tap-to-call helpline numbers.
 4. **Memory.** At the end of a session, lasting details and patterns are saved. Next time, the AI greets you with something from last time and keeps those details in mind.
 5. **Action and follow-through.** When it fits, the AI suggests one small thing to do (based on what you said and what helped before). Do it now as a guided exercise, set a reminder for later, or say no. Afterwards it asks how it felt and remembers.
+6. **Feedback loop.** Every action has a type (walk, breathing, music…). The app counts how each type went for you and picks the next suggestion's type from that, in code: more of what helped, none of what failed twice. **Memories** shows what helps.
 
 ```
 liquid-voice-orb/   React + Vite frontend (orb, landing page, voice session)
@@ -44,8 +45,9 @@ Open http://localhost:5173 **in Chrome**, slide **Start Now**, and allow the mic
 | 3 | `cd server && pip install -r requirements-dev.txt && pytest` | Every crisis test phrase triggers the safety response; none of the look-alikes ("this traffic is killing me") do |
 | 4 | Talk about something specific (a pet's name, an event coming up), tap **End**, then start again | The greeting brings up that detail. **Memories** on the start screen shows what was saved |
 | 5 | Open http://localhost:5173/?fastExercise=1, talk about something stressful for a couple of turns, answer the suggestion with "later, in 1 minute", wait | The reminder fires, the check-in runs the exercise, and your answer to "How did that feel?" shows up in **Memories** |
+| 6 | On http://localhost:5173/?fastExercise=1 say "can we do breathing?", answer "it didn't help"; then "let's go for a walk", answer "I feel better". Tap **End**, start again and talk for a couple of turns | The suggestion is a walk. **Memories → What helps** shows "Walk – helped 1 of 1" and "Breathing – helped 0 of 1" |
 
-The frontend has Playwright tests with the mic and speech output faked: `cd liquid-voice-orb && npm run test:e2e` (first time: `npx playwright install chromium`). Most mock the backend; the step 5 test runs the real backend with Gemini stubbed (`server/tests/e2e_server.py`), so it needs the server's packages: it uses `server/.venv` if present, else `python3` (or set `PYTHON`). It waits a real minute for the reminder, so the suite takes about 3 minutes.
+The frontend has Playwright tests with the mic and speech output faked: `cd liquid-voice-orb && npm run test:e2e` (first time: `npx playwright install chromium`). Most mock the backend; the step 5 and 6 tests (`actions.spec.js`, `feedback.spec.js`) run the real backend with Gemini stubbed (`server/tests/e2e_server.py`), so they need the server's packages: it uses `server/.venv` if present, else `python3` (or set `PYTHON`). The step 5 test waits a real minute for the reminder, so the suite takes about 4 minutes.
 
 ## How a turn works
 
@@ -89,13 +91,27 @@ Tests: `server/tests/test_memory.py` (Gemini stubbed; a live test runs if `GEMIN
   - **No** (or you talk about something else): it drops it and carries on.
 - **Exercise mode.** Shows the current step, a countdown, overall progress, and Pause / Stop. Each step is spoken as it starts; with natural voices, the next step's audio is generated while the current one runs. The mic is off during the steps and comes back on at the end, when the AI asks "How did that feel?"
 - **Reminders** are stored in SQLite (user id, action, exercise JSON, due time, status). The app sets a timer and shows a browser notification when one is due (it asks for permission when the first one is set). If you're mid-conversation, the check-in waits for a pause. Opening the app with a due or overdue reminder starts the session with its check-in: "Ready to do it now?" (now, later, or no).
-- **Outcome.** Your answer to "How did that feel?" is labelled yes / somewhat / no by the fast model and saved (action, done or stopped early or skipped, helped, your words) to SQLite and as a memory note ("Tried a five-minute walk: it helped."). Skipping a check-in is saved too. `GET /api/outcomes?user_id=…` lists them, for step 6.
+- **Outcome.** Your answer to "How did that feel?" is labelled yes / somewhat / no by the fast model and saved (action, type, done or stopped early or skipped, helped, your words) to SQLite and as a memory note ("Tried a five-minute walk: it helped."). Skipping a check-in is saved too. `GET /api/outcomes?user_id=…` lists them.
 - **Limit:** reminders only fire while the app is open in a browser tab (an in-app timer, no push server or service worker). A reminder missed while the tab was closed becomes a check-in the next time you open the app.
 - **Testing shortcuts:** say "in 1 minute" for a reminder a minute away, and open the app with `?fastExercise=1` to squeeze every exercise into about 20 seconds.
 
 Cost: one extra fast-model call per message while a suggestion is possible or an answer is expected, and one exercise call (two if the first fails the checks) per accepted action.
 
 Tests: `server/tests/test_actions.py` (validation and fallback, suggesting, now / later / no, reminders, check-in, outcome storage; Gemini stubbed, plus a live test if `GEMINI_API_KEY` is set) and `liquid-voice-orb/e2e/actions.spec.js`.
+
+## Feedback loop (step 6)
+
+- **Types.** Every suggestion, reminder and outcome has a type from a fixed list in `server/feedback.py` (`TYPES`): breathing, walk, stretch, grounding, music, journaling, reach_out, rest. The suggest call's JSON schema returns `type` (an enum of that list) with the action and line. Databases from step 5 get a `type` column on first use; old rows are labelled once by keyword matching ("a walk with music" → walk; nothing matched → `other`, which is shown but never suggested).
+- **Stats, in code.** Per person and type: tries (done or started), helped (yes 1, somewhat 0.5, no 0), skipped, stopped early, and when last tried. The score is a weighted average of past outcomes where each older one counts 0.6× the one after it, starting from a neutral 0.5 so a single result doesn't decide everything. Skipped counts 0.25; stopping early gets half credit; "done but didn't say" doesn't count either way.
+- **Picking the next type, in code.** Highest score wins. Types never tried get a +0.15 bonus, so it still explores (enough to beat a "somewhat", not a "yes"). A type whose last two tries were both "no" is never picked, unless every type is like that. Ties go to the type tried longest ago, then list order (so a new user starts with breathing).
+- **What Gemini does.** The suggest call gets the chosen type plus one line like "Worked for them: walk (helped 2 of 2). Didn't work: breathing (helped 0 of 1)." and only writes the wording; a reply of a different type is dropped. The exercise prompt gets the same line and the type.
+- **Asking for something.** "Can we do breathing?", "let's go for a walk", "how about a song": the app does that right away (a guided exercise of that type) and records how it went, even after the session's one suggestion. This check is a strict keyword pattern, with no model call; "I tried breathing" or "I want to rest" are not asks.
+- **What helps.** **Memories** on the start screen lists each type you've tried and how it went ("Walk – helped 2 of 2", "Breathing – helped 0 of 1, skipped 1") with when it was last tried. **Reset what helps** clears the outcomes and the memory notes made from them. API: `GET /api/stats?user_id=…` (per-type stats, best first, and `next`, the type that would be suggested) and `DELETE /api/stats?user_id=…`.
+- **Crisis rules are unchanged:** no suggestions or asked-for exercises on or after a crisis turn, and nothing said in a crisis turn is stored.
+
+No extra Gemini calls: the scoring is local, and the prompts got shorter (one line instead of a list of past outcomes).
+
+Tests: `server/tests/test_feedback.py` (scoring: no history, recent outcomes count more, the exploration bonus, the two-"no" rule, every type failing; keyword labels and asks; the migration; the stats endpoint and reset; "walk helped, breathing didn't → walk is suggested"; a live test if `GEMINI_API_KEY` is set) and `liquid-voice-orb/e2e/feedback.spec.js` (the same done-check through the UI and the real backend).
 
 ## Voice and pacing
 

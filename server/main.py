@@ -1,5 +1,5 @@
 """
-Conversation backend (build plan steps 2-5).
+Conversation backend (build plan steps 2-6).
 
 The browser does speech-to-text. This server turns the conversation so far into
 the next reply, decides whether the user has finished speaking, and (for the
@@ -25,6 +25,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 import actions
+import feedback
 import memory
 import safety
 
@@ -89,8 +90,10 @@ class ActionContext(BaseModel):
 
     mode: Literal["consider", "offer", "checkin", "feedback"]
     action: str = Field(default="", max_length=200)
+    action_type: str | None = Field(default=None, max_length=40)  # step 6: a feedback.TYPES key
     reminder_id: int | None = None
     done: bool = True  # feedback only: False if they stopped the exercise early
+    suggest: bool = True  # consider only: False once this session has had its suggestion (asks are still heard)
 
 
 class ChatRequest(BaseModel):
@@ -155,7 +158,8 @@ def crisis_turn(req: "ChatRequest") -> ChatResponse:
     ctx = req.action
     if ctx and req.user_id and ctx.action:
         if ctx.mode == "feedback":
-            actions.record_outcome(req.user_id, ctx.action, "done" if ctx.done else "skipped", reminder_id=ctx.reminder_id)
+            status, helped = ("done", None) if ctx.done else ("skipped", "unknown")
+            actions.record_outcome(req.user_id, ctx.action, status, helped, reminder_id=ctx.reminder_id, action_type=ctx.action_type)
         elif ctx.mode == "checkin" and ctx.reminder_id is not None:
             actions.update_reminder(req.user_id, ctx.reminder_id, status="cancelled")
     return crisis_response()
@@ -223,7 +227,15 @@ def user_words(req: ChatRequest) -> list[str]:
 async def action_check(gemini, req: ChatRequest) -> dict | None:
     """The fast-model call for this turn, run alongside the reply."""
     ctx, answer = req.action, req.history[-1].text
+    if ctx.mode in ("consider", "offer"):
+        # Asked for something by name ("can we do breathing?"): do that. Never after a crisis.
+        if any(t.crisis for t in req.history):
+            return None
+        if asked := feedback.requested(answer):
+            return {"kind": "request", "action_type": asked}
     if ctx.mode == "consider":
+        if not ctx.suggest:
+            return None
         found = await actions.consider(gemini, ACTION_MODEL, req.user_id, req.history)
         return {"kind": "suggest", **found} if found else None
     if not ctx.action:
@@ -234,9 +246,9 @@ async def action_check(gemini, req: ChatRequest) -> dict | None:
     return {"kind": "decide", **await actions.decide(gemini, ACTION_MODEL, offer, answer, time.time(), req.tz_offset)}
 
 
-async def fill_exercise(gemini, user_id: str, reminder_id: int, action: str, words: list[str]):
+async def fill_exercise(gemini, user_id: str, reminder_id: int, action: str, words: list[str], action_type: str):
     """Write a later reminder's exercise after the reply has gone, so setting it is quick."""
-    exercise, _ = await actions.make_exercise(gemini, EXERCISE_MODEL, user_id, action, words)
+    exercise, _ = await actions.make_exercise(gemini, EXERCISE_MODEL, user_id, action, words, action_type)
     actions.update_reminder(user_id, reminder_id, exercise=exercise)
 
 
@@ -244,26 +256,45 @@ async def action_result(gemini, req: ChatRequest, found: dict, tasks: Background
     """Turn the fast-model answer into a response. None: use the normal reply (with `found['event']` attached)."""
     ctx, uid = req.action, req.user_id
     if found["kind"] == "suggest":
-        return ChatResponse(reply=found["line"], action={"type": "offer", "action": found["action"]})
+        event = {"type": "offer", "action": found["action"], "action_type": found["action_type"]}
+        return ChatResponse(reply=found["line"], action=event)
+
+    if found["kind"] == "request":
+        kind = found["action_type"]
+        # What was just offered, if that's what they asked for; else the type's plain version.
+        action = ctx.action if ctx.mode == "offer" and ctx.action and ctx.action_type == kind else feedback.TYPES[kind].default
+        exercise, source = await actions.make_exercise(gemini, EXERCISE_MODEL, uid, action, user_words(req), kind)
+        event = {"type": "start", "action": action, "action_type": kind, "reminder_id": None, "exercise": exercise, "source": source}
+        return ChatResponse(reply=exercise["intro"], action=event)
 
     if found["kind"] == "feedback":
         if uid:
             status = "done" if ctx.done else "skipped"
-            saved = actions.record_outcome(uid, ctx.action, status, found["helped"], req.history[-1].text, ctx.reminder_id)
+            saved = actions.record_outcome(
+                uid, ctx.action, status, found["helped"], req.history[-1].text, ctx.reminder_id, ctx.action_type
+            )
             found["event"] = {"type": "saved", "outcome": saved}
         return None  # the normal reply responds to how they felt
 
     decision, rem = found["decision"], None
     if ctx.mode == "checkin" and uid and ctx.reminder_id is not None:
         rem = actions.get_reminder(uid, ctx.reminder_id)
+    kind = rem["type"] if rem else actions.type_of(ctx.action, ctx.action_type)
     if decision == "now":
         exercise = rem and rem["exercise"]
         source = "stored"
         if not exercise:
-            exercise, source = await actions.make_exercise(gemini, EXERCISE_MODEL, uid, ctx.action, user_words(req))
+            exercise, source = await actions.make_exercise(gemini, EXERCISE_MODEL, uid, ctx.action, user_words(req), kind)
         if rem:
             actions.update_reminder(uid, rem["id"], status="done")
-        event = {"type": "start", "action": ctx.action, "reminder_id": rem and rem["id"], "exercise": exercise, "source": source}
+        event = {
+            "type": "start",
+            "action": ctx.action,
+            "action_type": kind,
+            "reminder_id": rem and rem["id"],
+            "exercise": exercise,
+            "source": source,
+        }
         return ChatResponse(reply=exercise["intro"], action=event)
 
     if decision == "later":
@@ -276,15 +307,15 @@ async def action_result(gemini, req: ChatRequest, found: dict, tasks: Background
             actions.update_reminder(uid, rem["id"], due_at=found["due_at"])
             rem = actions.get_reminder(uid, rem["id"])
         else:
-            rem = actions.create_reminder(uid, ctx.action, found["due_at"])
-            tasks.add_task(fill_exercise, gemini, uid, rem["id"], ctx.action, user_words(req))
+            rem = actions.create_reminder(uid, ctx.action, found["due_at"], action_type=kind)
+            tasks.add_task(fill_exercise, gemini, uid, rem["id"], ctx.action, user_words(req), rem["type"])
         when = actions.when_text(rem["due_at"], now, req.tz_offset)
         reply = f"Okay, I'll check in with you {when}. Keep this app open in a tab and I'll remind you."
-        public = {k: rem[k] for k in ("id", "action", "due_at")}
+        public = {k: rem[k] for k in ("id", "action", "type", "due_at")}
         return ChatResponse(reply=reply, action={"type": "reminder", "reminder": public})
 
     if decision == "no" and rem:
-        actions.record_outcome(uid, ctx.action, "skipped", words=req.history[-1].text, reminder_id=rem["id"])
+        actions.record_outcome(uid, ctx.action, "skipped", words=req.history[-1].text, reminder_id=rem["id"], action_type=kind)
     found["event"] = {"type": "declined" if decision == "no" else "dropped"}
     return None
 
@@ -292,12 +323,13 @@ async def action_result(gemini, req: ChatRequest, found: dict, tasks: Background
 class ReminderOut(BaseModel):
     id: int
     action: str
+    type: str | None = None
     due_at: float
 
 
 @app.get("/api/reminders")
 def get_reminders(user_id: str = Query(pattern=memory.USER_ID.pattern)):
-    rems = [ReminderOut(**{k: r[k] for k in ("id", "action", "due_at")}) for r in actions.pending_reminders(user_id)]
+    rems = [ReminderOut(**{k: r[k] for k in ("id", "action", "type", "due_at")}) for r in actions.pending_reminders(user_id)]
     return {"reminders": rems, "now": time.time()}
 
 
@@ -311,6 +343,7 @@ def cancel_reminder(reminder_id: int, user_id: str = Query(pattern=memory.USER_I
 class OutcomeRequest(BaseModel):
     user_id: str = UserId()
     action: str = Field(min_length=1, max_length=200)
+    action_type: str | None = Field(default=None, max_length=40)
     reminder_id: int | None = None
     done: bool = True
 
@@ -318,13 +351,33 @@ class OutcomeRequest(BaseModel):
 @app.post("/api/outcomes")
 def save_outcome(req: OutcomeRequest):
     """For an exercise that ended without an answer to "how did that feel?" (e.g. the session was closed)."""
-    status = "done" if req.done else "skipped"
-    return actions.record_outcome(req.user_id, req.action, status, reminder_id=req.reminder_id)
+    status, helped = ("done", None) if req.done else ("skipped", "unknown")  # not done: started, stopped early
+    return actions.record_outcome(req.user_id, req.action, status, helped, reminder_id=req.reminder_id, action_type=req.action_type)
 
 
 @app.get("/api/outcomes")
 def get_outcomes(user_id: str = Query(pattern=memory.USER_ID.pattern)):
     return {"outcomes": actions.list_outcomes(user_id)}
+
+
+# ── Feedback loop (step 6) ───────────────────────────────────────────────────
+
+
+@app.get("/api/stats")
+def get_stats(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    """How each action type went for this person, best first, and the type that would be suggested next."""
+    st = actions.user_stats(user_id)
+    types = [
+        {"type": t, "label": feedback.TYPES[t].label if t in feedback.TYPES else "Other", **st[t], "summary": feedback.summary(st[t])}
+        for t in feedback.ranked(st)
+    ]
+    return {"types": types, "next": feedback.choose(st)}
+
+
+@app.delete("/api/stats")
+def reset_stats(user_id: str = Query(pattern=memory.USER_ID.pattern)):
+    """Start "what helps" afresh: removes the outcomes and the memory notes made from them."""
+    return {"ok": True, "removed": actions.reset_outcomes(user_id)}
 
 
 # ── Memory (step 4) ──────────────────────────────────────────────────────────

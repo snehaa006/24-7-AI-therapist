@@ -63,14 +63,14 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
   const remindersChangedRef = useRef(onRemindersChanged);
   remindersChangedRef.current = onRemindersChanged;
 
-  // Step 5 flow. At most one suggestion per session, never after a crisis.
-  const offerRef = useRef(null); // { mode: 'offer' | 'checkin', action, reminder_id? } while waiting for yes/later/no
-  const feedbackRef = useRef(null); // { action, reminder_id, done } while waiting for "how did that feel?"
+  // Step 5 flow. At most one suggestion per session, never after a crisis. Asking for one by name always works.
+  const offerRef = useRef(null); // { mode: 'offer' | 'checkin', action, action_type?, reminder_id? } while waiting for yes/later/no
+  const feedbackRef = useRef(null); // { action, action_type, reminder_id, done } while waiting for "how did that feel?"
   const offeredRef = useRef(false);
   const crisisSeenRef = useRef(false);
   const checkinRef = useRef(null); // a due reminder waiting for a good moment
   const runRef = useRef(0); // bumps to stop the running exercise
-  const runningRef = useRef(null); // { action, reminder_id } while an exercise runs
+  const runningRef = useRef(null); // { action, action_type, reminder_id } while an exercise runs
   const pausedRef = useRef(false);
 
   const commit = (turns) => {
@@ -195,11 +195,11 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
 
   /** Guided exercise: intro, then each step spoken as it starts with its timer, then the closing. Mic off throughout. */
   const runExercise = useCallback(
-    async ({ exercise: ex, action, reminder_id }) => {
+    async ({ exercise: ex, action, action_type, reminder_id }) => {
       const run = ++runRef.current;
       turnRef.current++;
       listenerRef.current.stop();
-      runningRef.current = { action, reminder_id: reminder_id ?? null };
+      runningRef.current = { action, action_type, reminder_id: reminder_id ?? null };
       pausedRef.current = false;
       const secs = stepSeconds(ex);
       setExercise({ title: ex.title, steps: ex.steps, secs, index: -1, remaining: 0, paused: false });
@@ -238,8 +238,9 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
   const actionContext = () => {
     if (feedbackRef.current) return { mode: 'feedback', ...feedbackRef.current };
     if (offerRef.current) return offerRef.current;
-    if (!offeredRef.current && !crisisSeenRef.current && !FIXED_MODE) return { mode: 'consider' };
-    return null;
+    if (crisisSeenRef.current || FIXED_MODE) return null;
+    // After this session's suggestion, the server only listens for "can we do breathing?" (step 6).
+    return offeredRef.current ? { mode: 'consider', suggest: false } : { mode: 'consider' };
   };
 
   /** Update the flow from the server's answer. → true if an exercise was started (it does its own speaking). */
@@ -256,10 +257,11 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     if (ctx?.mode === 'checkin' || ev?.type === 'reminder') remindersChangedRef.current?.();
     if (ev?.type === 'offer') {
       offeredRef.current = true;
-      offerRef.current = { mode: 'offer', action: ev.action };
+      offerRef.current = { mode: 'offer', action: ev.action, action_type: ev.action_type };
     }
     if (ev?.type === 'reminder') askNotificationPermission();
     if (ev?.type === 'start') {
+      offeredRef.current = true; // asked for, or accepted: no other suggestion this session
       runExercise(ev);
       return true;
     }

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -50,7 +51,10 @@ def api(monkeypatch, tmp_path):
                 value = value.pop(0) if len(value) > 1 else value[0]
             if isinstance(value, Exception):
                 raise value
-            return copy.deepcopy(value)
+            value = copy.deepcopy(value)
+            if key == "suggest" and "type" not in value:  # Gemini keeps to the type it was given
+                value["type"] = re.search(r"^Type: (\w+)", prompt, re.M)[1]
+            return value
 
         return fake
 
@@ -162,7 +166,7 @@ def test_exercise_prompt_is_personal(api):
     actions.record_outcome(USER, "slow breathing", "done", "no")
     prompt = actions.exercise_input(USER, ACTION, ["my manager keeps piling things on"])
     assert ACTION in prompt and "my manager keeps piling things on" in prompt
-    assert "Fleetwood Mac" in prompt and "slow breathing: it didn't help" in prompt
+    assert "Fleetwood Mac" in prompt and "Didn't work: breathing (helped 0 of 1)" in prompt
 
 
 # ── Suggesting ───────────────────────────────────────────────────────────────
@@ -172,7 +176,7 @@ def test_suggests_one_action_when_it_fits(api):
     client, state = api
     res = chat(client, TALK, {"mode": "consider"})
     assert res["reply"] == state["suggest"]["line"]
-    assert res["action"] == {"type": "offer", "action": ACTION}
+    assert res["action"] == {"type": "offer", "action": ACTION, "action_type": "breathing"}  # nothing tried yet
     assert "My manager keeps piling" in called(state, "suggest")[0]
 
 
@@ -366,8 +370,9 @@ def test_feedback_saves_the_outcome_to_sqlite_and_memory(api):
     assert client.get("/api/outcomes", params={"user_id": USER}).json()["outcomes"][0]["id"] == saved["id"]
     notes = [m["text"] for m in memory.list_memories(USER)]
     assert f'Tried {ACTION}: it helped a little. They said: "a bit lighter actually"' in notes
+    assert saved["type"] == "walk"  # labelled from the action, as this request didn't say
     # Shows up for the next suggestion.
-    assert f"{ACTION}: it helped a little" in actions.outcomes_block(USER)
+    assert "walk (helped 0 of 1, a little 1)" in actions.exercise_input(USER, ACTION, [])
 
 
 def test_feedback_after_stopping_early(api):

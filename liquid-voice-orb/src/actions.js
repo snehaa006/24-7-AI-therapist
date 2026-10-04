@@ -1,4 +1,5 @@
 // Action and follow-through (step 5): reminders, outcomes, browser notifications, fast test mode.
+// Feedback loop (step 6): how each type of action went ("What helps").
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { userId } from './memory.js';
 
@@ -24,10 +25,14 @@ const q = () => `user_id=${encodeURIComponent(userId())}`;
 export const fetchReminders = () => call(`/api/reminders?${q()}`).then((d) => (Array.isArray(d?.reminders) ? d.reminders : []));
 
 /** An exercise that ended without an answer to "how did that feel?" (the session was closed). */
-export function saveOutcome({ action, reminder_id = null, done = true }) {
-  const body = JSON.stringify({ user_id: userId(), action, reminder_id, done });
+export function saveOutcome({ action, action_type = null, reminder_id = null, done = true }) {
+  const body = JSON.stringify({ user_id: userId(), action, action_type, reminder_id, done });
   fetch('/api/outcomes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
 }
+
+/** → { types: [{ type, label, tries, summary, last_tried, … }], next }, best first. */
+export const fetchStats = () => call(`/api/stats?${q()}`);
+export const resetStats = () => call(`/api/stats?${q()}`, { method: 'DELETE' });
 
 /** Ask once, when the first reminder is set. */
 export function askNotificationPermission() {
