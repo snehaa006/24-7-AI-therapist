@@ -202,8 +202,79 @@ def test_voice_model_gets_only_the_words(monkeypatch, tmp_path):
         audio = SimpleNamespace(data=b"\0\0" * 100, mime_type="audio/L16;rate=24000")
         return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(inline_data=audio)]))])
 
-    pool = SimpleNamespace(keys=["k"], aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    pool = SimpleNamespace(
+        keys=["k"],
+        status=lambda model: {"keys": 1, "resting": 0},
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)),
+    )
+    monkeypatch.setattr(main, "stt_client", lambda: None)
     monkeypatch.setattr(main, "gemini_client", lambda: pool)
     monkeypatch.setattr(main, "TTS_CACHE", tmp_path)
     r = TestClient(main.app).post("/api/speak", json={"text": "Hi, I'm here.", "voice": "Sulafat"})
     assert r.status_code == 200 and sent == ["Hi, I'm here."]
+
+
+
+def make_wav(n: int) -> bytes:
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(b"\1\0" * n)
+    return buf.getvalue()
+
+
+def test_speech_pieces_fit_orpheus_limit():
+    import main
+
+    text = "I'm really glad you told me. " + "That sounds like such a heavy week, with the reports, the late nights and your boss pushing, " * 3 + "How are you holding up?"
+    pieces = main.speech_pieces(text)
+    assert all(len(p) <= 200 for p in pieces) and len(pieces) > 1
+    assert " ".join(pieces).split() == text.split()  # nothing lost or reordered
+    assert main.speech_pieces("Short one.") == ["Short one."]
+
+
+def test_join_wavs():
+    import io
+    import wave
+
+    import main
+
+    joined = main.join_wavs([make_wav(100), make_wav(50)])
+    with wave.open(io.BytesIO(joined)) as w:
+        assert w.getnframes() == 150 and w.getframerate() == 48000
+
+
+def test_gemini_voice_falls_back_to_groq_and_is_not_cached(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    import main
+
+    async def blocked(**kw):
+        raise errors.APIError(403, {"error": {"code": 403, "message": "Your project has been denied access.", "status": ""}})
+
+    gemini = keys.RotatingClient(["k"], make_client=lambda api_key: SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=blocked))))
+    spoken = []
+
+    async def speech(self, text, voice, model):
+        spoken.append((text, voice, model))
+        return make_wav(10)
+
+    monkeypatch.setattr(main, "gemini_client", lambda: gemini)
+    monkeypatch.setattr(main, "TTS_CACHE", tmp_path)
+    monkeypatch.setenv("GROQ_API_KEY", "g1")
+    monkeypatch.setattr(main, "_stt", None)
+    monkeypatch.setattr(compat.CompatClient, "speech", speech)
+    api = TestClient(main.app)
+    r = api.post("/api/speak", json={"text": "Hi there.", "voice": "Charon"})  # a male Gemini voice
+    assert r.status_code == 200 and spoken == [("Hi there.", "daniel", main.GROQ_TTS_MODEL)]
+    assert not list(tmp_path.iterdir()), "stand-in audio isn't cached under the Gemini voice"
+    # picking a Groq voice directly works too, and is cached
+    assert api.post("/api/speak", json={"text": "Hello.", "voice": "hannah"}).status_code == 200
+    assert spoken[-1][1] == "hannah" and len(list(tmp_path.iterdir())) == 1

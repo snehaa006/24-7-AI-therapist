@@ -606,6 +606,70 @@ VOICES = {
     "Kore", "Charon", "Aoede", "Puck", "Leda", "Zephyr", "Gacrux", "Iapetus",
 }
 
+# Groq's Orpheus voices: used when picked in the app, and in place of a Gemini voice that fails
+# (quota, a blocked project) when a Groq key is set. Gemini voice → the Orpheus voice closest in feel.
+GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
+GROQ_VOICES = {"autumn", "diana", "hannah", "austin", "daniel", "troy"}
+GEMINI_MALE = {"Enceladus", "Algieba", "Achird", "Schedar", "Charon", "Puck", "Iapetus"}
+ORPHEUS_LIMIT = 200  # characters per request
+
+
+def groq_voice_for(gemini_voice: str) -> str:
+    return "daniel" if gemini_voice in GEMINI_MALE else "autumn"
+
+
+def speech_pieces(text: str, limit: int = ORPHEUS_LIMIT) -> list[str]:
+    """`text` cut into pieces of at most `limit` characters, at sentence ends, else commas, else spaces."""
+    import re as _re
+
+    pieces = []
+    for sentence in _re.findall(r"[^.!?]+[.!?]*\s*", text) or [text]:
+        sentence = sentence.strip()
+        while len(sentence) > limit:
+            cut = max(sentence.rfind(", ", 0, limit), sentence.rfind("; ", 0, limit))
+            cut = cut + 1 if cut > limit // 3 else sentence.rfind(" ", 0, limit)
+            if cut <= 0:
+                cut = limit
+            pieces.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if sentence:
+            if pieces and len(pieces[-1]) + 1 + len(sentence) <= limit:
+                pieces[-1] = f"{pieces[-1]} {sentence}"
+            else:
+                pieces.append(sentence)
+    return pieces
+
+
+def join_wavs(clips: list[bytes]) -> bytes:
+    """Several WAV clips with the same format → one WAV."""
+    if len(clips) == 1:
+        return clips[0]
+    frames, params = [], None
+    for clip in clips:
+        with wave.open(io.BytesIO(clip)) as w:
+            params = params or w.getparams()
+            frames.append(w.readframes(w.getnframes()))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setparams(params)
+        for f in frames:
+            out.writeframes(f)
+    return buf.getvalue()
+
+
+async def groq_speech(text: str, voice: str) -> bytes:
+    pool = stt_client()  # the Groq key pool (shared with transcription)
+    if pool is None:
+        raise HTTPException(404, "Set GROQ_API_KEY to use the Groq voices.")
+    pieces = speech_pieces(text)
+    try:
+        clips = await asyncio.gather(
+            *(pool.run(GROQ_TTS_MODEL, lambda c, p=p: c.speech(p, voice, GROQ_TTS_MODEL)) for p in pieces)
+        )
+    except Exception as e:
+        raise gemini_failed(e, "Groq voice", pool) from e
+    return join_wavs(list(clips))
+
 # Only the words go to the voice model: newer ones read any instruction in front of them out loud.
 # Tone comes from the voice chosen in the app.
 
@@ -630,31 +694,69 @@ def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
 
 @app.post("/api/speak")
 async def speak(req: SpeakRequest):
-    if req.voice not in VOICES:
+    groq_voice = req.voice in GROQ_VOICES
+    if req.voice not in VOICES and not groq_voice:
         raise HTTPException(400, f"Unknown voice {req.voice!r}.")
-    key = hashlib.sha256(f"{TTS_MODEL}|{req.voice}|{req.text}".encode()).hexdigest()
+    model = GROQ_TTS_MODEL if groq_voice else TTS_MODEL
+    key = hashlib.sha256(f"{model}|{req.voice}|{req.text}".encode()).hexdigest()
     cached = TTS_CACHE / f"{key}.wav"
     if cached.exists():
         return Response(content=cached.read_bytes(), media_type="audio/wav")
 
+    if groq_voice:
+        audio, keep = await groq_speech(req.text, req.voice), True
+    else:
+        audio, keep = await gemini_speech(req.text, req.voice)
+    try:
+        if not keep:
+            raise OSError  # a stand-in voice: don't cache it under the voice that was asked for
+        TTS_CACHE.mkdir(exist_ok=True)
+        cached.write_bytes(audio)
+    except OSError:
+        pass  # caching is best-effort
+    return Response(content=audio, media_type="audio/wav")
+
+
+async def gemini_speech(text: str, voice: str) -> tuple[bytes, bool]:
+    """A Gemini voice. If Gemini can't (quota, a blocked project) and a Groq key is set, a similar Groq voice.
+    → (wav, True if it is the voice asked for)"""
+    has_groq = stt_client() is not None
+    pool = None
+    try:
+        pool = gemini_client()
+        st = pool.status(TTS_MODEL)
+        if has_groq and st["resting"] == st["keys"]:
+            raise RuntimeError("every Gemini key is resting for the voice model")  # skip straight to Groq
+        return await gemini_tts(pool, text, voice), True
+    except Exception as e:
+        if not has_groq:
+            if isinstance(e, HTTPException):
+                raise
+            raise gemini_failed(e, "Natural voice", pool) from e
+        log_once(f"Gemini voice unavailable ({getattr(e, 'message', None) or getattr(e, 'detail', None) or e}), using Groq voices.")
+        return await groq_speech(text, groq_voice_for(voice)), False
+
+
+_logged: set[str] = set()
+
+
+def log_once(msg: str):
+    if msg not in _logged:
+        _logged.add(msg)
+        print(msg, flush=True)
+
+
+async def gemini_tts(pool, text: str, voice: str) -> bytes:
     config = types.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=req.voice),
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice),
             )
         ),
     )
-    try:
-        resp = await gemini_client().aio.models.generate_content(
-            model=TTS_MODEL, contents=req.text, config=config
-        )
-        data = resp.candidates[0].content.parts[0].inline_data
-    except HTTPException:
-        raise
-    except Exception as e:  # quota (TTS free limits are low), bad key, unknown model, empty response
-        raise gemini_failed(e, "Natural voice", gemini_client()) from e
-
+    resp = await pool.aio.models.generate_content(model=TTS_MODEL, contents=text, config=config)
+    data = resp.candidates[0].content.parts[0].inline_data
     audio = data.data
     # Gemini returns raw 16-bit PCM (audio/L16;rate=24000); wrap it so browsers can play it.
     if "wav" not in (data.mime_type or ""):
@@ -663,9 +765,4 @@ async def speak(req: SpeakRequest):
             if part.strip().startswith("rate="):
                 rate = int(part.split("=")[1])
         audio = pcm_to_wav(audio, rate)
-    try:
-        TTS_CACHE.mkdir(exist_ok=True)
-        cached.write_bytes(audio)
-    except OSError:
-        pass  # caching is best-effort
-    return Response(content=audio, media_type="audio/wav")
+    return audio
