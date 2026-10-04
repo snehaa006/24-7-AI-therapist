@@ -10,7 +10,7 @@ import { SHELL_VERT, SHELL_FRAG, POINTS_VERT, POINTS_FRAG } from './shaders.js';
 const RINGS = 130;            // particle rings pole-to-pole (~21k particles). Lower on weak GPUs.
 const HIST_STEP = 1 / 45;     // seconds between history samples (wave travel speed)
 const BLOOM_BASE = 0.55;      // glow at rest
-const BLOOM_VOICE = 0.55;     // extra glow while speaking
+const BLOOM_VOICE = 0.22;     // extra glow while speaking (kept low so it glows, not flickers)
 const BASE_DISTANCE = 5.8;    // camera distance the particle size was tuned at
 const PALETTE = {
   deep: '#0a2470',
@@ -218,7 +218,7 @@ export default function LiquidOrb({ engine, className = 'orb', distance = BASE_D
       shared.uMid.value = b.mid;
       shared.uTreble.value = b.treble;
       shared.uHistMean.value = mean / 32;
-      shared.uGlow.value = 0.85 + b.level * 0.55;
+      shared.uGlow.value = 0.9 + b.level * 0.22;
       shared.uSrc.value
         .set(Math.sin(elapsed * 0.11) * 0.8, 0.55 + Math.sin(elapsed * 0.07) * 0.3, Math.cos(elapsed * 0.09) * 0.8)
         .normalize();

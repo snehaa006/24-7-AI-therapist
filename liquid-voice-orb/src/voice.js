@@ -15,8 +15,8 @@ export const voiceSupported = Boolean(SR) && typeof window !== 'undefined' && 's
  *   max      – longest silence before the turn ends no matter what
  */
 export const PACING = {
-  quick: { label: 'Quick', check: 900, trailing: 2200, max: 3500 },
-  natural: { label: 'Natural', check: 1300, trailing: 3000, max: 6000 },
+  quick: { label: 'Quick', check: 700, trailing: 2000, max: 3200 },
+  natural: { label: 'Natural', check: 1000, trailing: 2800, max: 5500 },
   patient: { label: 'Patient', check: 2000, trailing: 4500, max: 9000 },
 };
 
@@ -26,18 +26,42 @@ const TRAILING =
 
 const words = (t) => (t ? t.split(/\s+/).filter(Boolean).length : 0);
 
+// Chrome usually lists the likeliest guess first, but not always: take the most confident one.
+function bestAlternative(result) {
+  let best = result[0];
+  for (let i = 1; i < result.length; i++) if ((result[i].confidence || 0) > (best.confidence || 0)) best = result[i];
+  return best.transcript;
+}
+
+/** Speech recognition languages. Picking your accent's variant (e.g. Indian English) helps a lot. */
+export const SPEECH_LANGS = [
+  { id: '', label: 'Browser default' },
+  { id: 'en-US', label: 'English (US)' },
+  { id: 'en-GB', label: 'English (UK)' },
+  { id: 'en-IN', label: 'English (India)' },
+  { id: 'en-AU', label: 'English (Australia)' },
+  { id: 'en-CA', label: 'English (Canada)' },
+  { id: 'en-IE', label: 'English (Ireland)' },
+  { id: 'en-ZA', label: 'English (South Africa)' },
+  { id: 'en-NG', label: 'English (Nigeria)' },
+  { id: 'en-SG', label: 'English (Singapore)' },
+  { id: 'en-PH', label: 'English (Philippines)' },
+];
+
 /**
  * Listens for one user turn and decides when it is over, the way a person would:
  * short pauses are allowed, trailing words buy more time, and an `isComplete(text)`
- * check (Gemini) decides whether the thought sounds finished.
+ * check (Gemini) decides whether the thought sounds finished. `onPause(text)` fires as
+ * that check starts, so the reply can be requested at the same time instead of after it.
  *
  * After a turn is handed off with onTurn, the recogniser keeps running until stop()
  * (called when the reply starts playing). If the user carries on talking before then,
  * onResume fires and the same turn continues — nothing they said is lost.
  */
 export class TurnListener {
-  constructor({ onInterim, onTurn, onResume, onWaiting, onError, isComplete }) {
-    Object.assign(this, { onInterim, onTurn, onResume, onWaiting, onError, isComplete });
+  constructor({ onInterim, onTurn, onResume, onWaiting, onError, onPause, isComplete }) {
+    Object.assign(this, { onInterim, onTurn, onResume, onWaiting, onError, onPause, isComplete });
+    this.lang = '';
     this.pacing = PACING.natural;
     this._rec = null;
     this._active = false;
@@ -51,6 +75,11 @@ export class TurnListener {
 
   setPacing(name) {
     this.pacing = PACING[name] || PACING.natural;
+  }
+
+  /** Speech language, e.g. 'en-IN'. '' = the browser's language. Takes effect on the next start(). */
+  setLang(lang) {
+    this.lang = lang || '';
   }
 
   start() {
@@ -117,9 +146,10 @@ export class TurnListener {
       return;
     }
 
+    this.onPause?.(text);
     let complete = true;
     if (this.isComplete) {
-      const timeout = new Promise((r) => setTimeout(() => r(true), 1800));
+      const timeout = new Promise((r) => setTimeout(() => r(true), 1500));
       complete = await Promise.race([this.isComplete(text).catch(() => true), timeout]);
     }
     if (gen !== this._gen) return; // they spoke again while we were checking
@@ -139,16 +169,16 @@ export class TurnListener {
 
   _open() {
     const rec = new SR();
-    rec.lang = navigator.language || 'en-US';
+    rec.lang = this.lang || navigator.language || 'en-US';
     rec.continuous = true;
     rec.interimResults = true;
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 3;
 
     rec.onresult = (e) => {
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) this._committed += ` ${r[0].transcript}`;
+        if (r.isFinal) this._committed += ` ${bestAlternative(r)}`;
         else interim += r[0].transcript;
       }
       this._pending = interim;
@@ -306,10 +336,16 @@ function fetchVoice(text, voice) {
 // Gemini generates the whole clip before sending it, and longer clips take longer.
 // So the first sentence goes on its own (short → starts playing sooner) while the
 // rest is generated in parallel and is usually ready by the time it's needed.
+// A long first sentence is cut at its first comma, so even then the voice starts quickly.
 function voiceChunks(text) {
   const parts = sentences(text);
   let first = '';
   while (parts.length && first.length < 15) first = `${first} ${parts.shift()}`.trim();
+  const clause = words(first) > 12 && first.match(/^(\S+(?:\s+\S+){2,}?[,;:])\s+(.+)$/);
+  if (clause) {
+    first = clause[1];
+    parts.unshift(clause[2]);
+  }
   return parts.length ? [first, parts.join(' ')] : [first];
 }
 

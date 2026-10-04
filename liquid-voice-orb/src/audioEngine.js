@@ -17,9 +17,10 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 // Tuning: shape each band so ordinary speech spans the full 0..1 range.
 const GAIN = { level: 3.4, bass: 1.3, mid: 1.5, treble: 2.2 };
 const CURVE = 1.8;
-// Envelope follower speeds (higher = snappier). Fast attack, slower release feels like liquid.
-const ATTACK = 28;
-const RELEASE = 7;
+// Envelope follower speeds (higher = snappier). Soft attack, slower release: the orb swells and
+// settles like water instead of jumping with every syllable.
+const ATTACK = 9;
+const RELEASE = 3.5;
 
 export class AudioEngine {
   constructor() {
@@ -45,7 +46,7 @@ export class AudioEngine {
       this.ctx = new AC();
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 1024;
-      this.analyser.smoothingTimeConstant = 0.55;
+      this.analyser.smoothingTimeConstant = 0.75;
       this._freq = new Uint8Array(this.analyser.frequencyBinCount);
       this._time = new Uint8Array(this.analyser.fftSize);
     }

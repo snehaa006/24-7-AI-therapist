@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS = {
   rate: 1,
   pitch: 1,
   pacing: 'natural', // see PACING in voice.js
+  speechLang: '', // speech recognition language, e.g. 'en-IN'; '' = the browser's (SPEECH_LANGS in voice.js)
 };
 
 function load() {

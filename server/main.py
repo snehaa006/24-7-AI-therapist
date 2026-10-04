@@ -20,12 +20,12 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
 import actions
 import feedback
+import keys
 import memory
 import safety
 
@@ -41,16 +41,27 @@ EXERCISE_MODEL = os.getenv("GEMINI_EXERCISE_MODEL", "gemini-2.5-flash")  # write
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
 SYSTEM_PROMPT = """\
-You are a warm, calm companion someone can talk to at any hour. You are speaking out loud,
-so your words are turned into speech.
+You are a warm, emotionally present companion someone can talk to at any hour, like a close friend
+who happens to be a really good listener. You are speaking out loud: your words are turned into speech,
+so write exactly how a caring person talks, not how they write.
 
-How you respond:
-- Listen first. Reflect back the specific thing the person just said, in your own words,
-  so they know you heard them. Use their details (names, places, feelings), not generic phrases.
-- Then ask exactly ONE gentle, open follow-up question that goes a little deeper into what they said.
-- Keep it short: one to three sentences, under 60 words.
-- Do not give advice, tips, or lists. Do not suggest exercises or solutions unless they directly ask.
-- Plain spoken language only: no markdown, bullet points, emojis, or headings.
+Sound like a real person:
+- React first, with real feeling, to what they just said ("Oh, that's a lot to carry.", "Wait, really?
+  That's huge!", "Ugh, I'm sorry, that sounds so frustrating."). Let your tone match theirs: gentle when
+  they're hurting, lighter and glad with them when something's good.
+- Use their details (names, places, what happened), never generic lines. Use contractions and everyday words.
+- Vary how you start. Don't open with "It sounds like", "I hear you" or "That must be"; don't repeat
+  their words back like a script.
+- Usually ask ONE short, curious follow-up that goes a little deeper. Sometimes, when they've shared
+  something heavy, just stay with them instead ("I'm really glad you told me.").
+- Keep it short: one to three sentences, usually under 45 words. Short replies keep the conversation flowing.
+- Don't give advice, tips or lists, and don't suggest exercises or solutions unless they directly ask.
+- Plain spoken language only: no markdown, bullet points, emojis, headings or stage directions.
+
+Their words come from live speech recognition, so a word may be misheard or missing. Work out what they
+most likely meant from the context and answer that. Don't point out the mistake. If you truly can't tell,
+ask casually, the way a friend would ("Sorry, did you say your sister or your sitter?").
+
 - If their message sounds cut off mid-thought, don't answer it yet: just invite them to go on,
   in a few words (for example "Take your time, I'm listening.").
 - Do not diagnose. Do not say you are a therapist or a human.
@@ -60,16 +71,17 @@ How you respond:
 """
 
 app = FastAPI(title="24/7 AI Therapist")
-_client: genai.Client | None = None
+_client: keys.RotatingClient | None = None
 
 
-def client() -> genai.Client:
+def client() -> keys.RotatingClient:
+    """Every Gemini call goes through here. With several keys set, a key that runs out is skipped (keys.py)."""
     global _client
     if _client is None:
-        key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not key:
+        found = keys.load_keys()
+        if not found:
             raise HTTPException(500, "GEMINI_API_KEY is not set. Copy server/.env.example to server/.env.")
-        _client = genai.Client(api_key=key)
+        _client = keys.RotatingClient(found)
     return _client
 
 
@@ -134,7 +146,7 @@ def no_thinking(model: str, config: types.GenerateContentConfig) -> types.Genera
 def generation_config(memories: str = "") -> types.GenerateContentConfig:
     return no_thinking(
         MODEL,
-        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT + memories, temperature=0.8, max_output_tokens=300),
+        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT + memories, temperature=0.9, max_output_tokens=300),
     )
 
 
@@ -145,7 +157,9 @@ def crisis_resources():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))}
+    found = keys.load_keys()
+    pool = _client.status() if _client else {"keys": len(found), "resting": 0}
+    return {"ok": True, "model": MODEL, "key_set": bool(found), **pool}
 
 
 def crisis_response() -> ChatResponse:
@@ -493,7 +507,7 @@ VOICES = {
 }
 
 # Kept short: the longer the audio, the longer Gemini takes to generate it. Speed is set in the app.
-TTS_STYLE = "Say in a calm, warm, gentle voice:"
+TTS_STYLE = "Say warmly and naturally, like a caring friend:"
 
 # Generated audio is saved here, so repeated lines (greeting, previews) play instantly and cost no quota.
 TTS_CACHE = Path(__file__).parent / ".tts-cache"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { NATURAL_VOICES, PACING, listDeviceVoices, speak, stopSpeaking } from './voice.js';
+import { NATURAL_VOICES, PACING, SPEECH_LANGS, listDeviceVoices, speak, stopSpeaking } from './voice.js';
 
 const PREVIEW = "Hi, I'm here with you. Take all the time you need.";
 
@@ -61,7 +61,7 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" role="dialog" aria-modal="true" aria-label="Voice settings" onClick={(e) => e.stopPropagation()}>
         <header className="sheet-head">
-          <h2>Voice &amp; pacing</h2>
+          <h2>Voice &amp; listening</h2>
           <button className="ghost" onClick={onClose}>
             Done
           </button>
@@ -140,6 +140,18 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
             options={Object.entries(PACING).map(([id, p]) => [id, p.label])}
           />
           <p className="hint">{PACING_HINT[settings.pacing]}</p>
+        </section>
+
+        <section>
+          <h3>Your accent</h3>
+          <select value={settings.speechLang} onChange={(e) => update({ speechLang: e.target.value })} aria-label="Speech recognition language">
+            {SPEECH_LANGS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.id ? l.label : `${l.label} (${navigator.language || 'en-US'})`}
+              </option>
+            ))}
+          </select>
+          <p className="hint">Pick the English closest to how you speak, so you're understood better.</p>
         </section>
 
         {canPreview ? (
