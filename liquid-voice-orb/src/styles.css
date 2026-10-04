@@ -688,3 +688,119 @@ input {
   outline: 2px solid #9fd8ff;
   outline-offset: 2px;
 }
+
+/* ── crisis card ─────────────────────────────────────────────────────────── */
+.crisis-card {
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(252, 217, 166, 0.45);
+  background: rgba(30, 22, 18, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  text-align: center;
+  animation: rise 0.3s ease both;
+}
+
+.crisis-card h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.crisis-card p {
+  margin: 6px 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.crisis-links {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.crisis-call {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: #fff;
+  color: #0b1530;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.crisis-call strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.crisis-call.urgent {
+  background: #fcd9a6;
+}
+
+.crisis-call:focus-visible {
+  outline: 2px solid #9fd8ff;
+  outline-offset: 2px;
+}
+
+/* ── memory panel ────────────────────────────────────────────────────────── */
+.memory-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.memory-list li:first-child {
+  border-top: 0;
+}
+
+.memory-list button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.memory-list button:hover,
+.memory-list button:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  outline: none;
+}
+
+.memory-summary,
+.memory-empty {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.memory-empty {
+  margin-top: 18px;
+}
+
+.preview.danger {
+  background: #ffb4c8;
+}

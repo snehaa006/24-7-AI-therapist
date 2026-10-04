@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 .DS_Store
 .tts-cache/
+server/memory.db
+.pytest_cache/
+test-results/
+playwright-report/

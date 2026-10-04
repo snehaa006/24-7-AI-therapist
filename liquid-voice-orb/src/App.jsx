@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import LiquidOrb from './LiquidOrb.jsx';
 import SwipeToStart from './SwipeToStart.jsx';
 import VoiceSettings from './VoiceSettings.jsx';
+import MemoryPanel from './MemoryPanel.jsx';
 import { useSettings } from './settings.js';
 import { AudioEngine } from './audioEngine.js';
 import { voiceSupported } from './voice.js';
@@ -67,7 +68,7 @@ function GearButton({ onClick }) {
   );
 }
 
-function Landing({ onStart, onSettings }) {
+function Landing({ onStart, onSettings, onMemories }) {
   return (
     <section className="screen landing">
       <header className="hero">
@@ -75,7 +76,14 @@ function Landing({ onStart, onSettings }) {
           <p className="eyebrow">
             <span className="dot" /> Available 24/7
           </p>
-          <GearButton onClick={onSettings} />
+          <div className="session-buttons">
+            {!FIXED_MODE && (
+              <button className="ghost" onClick={onMemories}>
+                Memories
+              </button>
+            )}
+            <GearButton onClick={onSettings} />
+          </div>
         </div>
         <h1>
           Someone
@@ -105,8 +113,41 @@ function Landing({ onStart, onSettings }) {
   );
 }
 
+const telHref = (n) => `tel:${n.replace(/[^\d+]/g, '')}`;
+
+/** Shown when a message is flagged as a crisis. Numbers come from server config (server/.env). */
+function CrisisCard({ resources, onClose }) {
+  const { helpline_name: name, helpline_number: number, emergency_number: emergency, directory_url: directory } = resources;
+  return (
+    <aside className="crisis-card" role="alertdialog" aria-labelledby="crisis-title">
+      <h2 id="crisis-title">You don’t have to face this alone</h2>
+      <p>Talking to a person right now can help. These are free and confidential.</p>
+      <div className="crisis-links">
+        {number ? (
+          <a className="crisis-call" href={telHref(number)}>
+            <span>{name || 'Crisis line'}</span>
+            <strong>Call {number}</strong>
+          </a>
+        ) : (
+          <a className="crisis-call" href={directory} target="_blank" rel="noreferrer">
+            <span>Crisis lines near you</span>
+            <strong>Find a helpline</strong>
+          </a>
+        )}
+        <a className="crisis-call urgent" href={telHref(emergency)}>
+          <span>In danger right now</span>
+          <strong>Call {emergency}</strong>
+        </a>
+      </div>
+      <button className="ghost" onClick={onClose}>
+        Keep talking here
+      </button>
+    </aside>
+  );
+}
+
 function Session({ session, onEnd, onSettings }) {
-  const { phase, history, interim, waiting, error, interrupt, send } = session;
+  const { phase, history, interim, waiting, error, crisis, dismissCrisis, interrupt, send } = session;
   const clock = useElapsed(true);
   const [showLog, setShowLog] = useState(false);
   const [draft, setDraft] = useState('');
@@ -150,6 +191,7 @@ function Session({ session, onEnd, onSettings }) {
       </div>
 
       <footer className="session-foot">
+        {crisis && <CrisisCard resources={crisis} onClose={dismissCrisis} />}
         <div className="session-actions">
           <button className="ghost" onClick={() => setShowLog((v) => !v)} aria-expanded={showLog}>
             {showLog ? 'Hide transcript' : `Transcript · ${userTurns}`}
@@ -202,6 +244,7 @@ export default function App() {
   const session = useTherapySession(engine, settings);
   const [inSession, setInSession] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showMemories, setShowMemories] = useState(false);
   const openSettings = () => setShowSettings(true);
 
   const start = () => {
@@ -220,8 +263,9 @@ export default function App() {
       {inSession ? (
         <Session session={session} onEnd={end} onSettings={openSettings} />
       ) : (
-        <Landing onStart={start} onSettings={openSettings} />
+        <Landing onStart={start} onSettings={openSettings} onMemories={() => setShowMemories(true)} />
       )}
+      {showMemories && <MemoryPanel onClose={() => setShowMemories(false)} />}
       {showSettings && (
         <VoiceSettings settings={settings} update={updateSettings} onClose={() => setShowSettings(false)} canPreview={!inSession} />
       )}
