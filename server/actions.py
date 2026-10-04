@@ -415,7 +415,7 @@ def suggest_input(user_id: str | None, turns, action_type: str, history: str = "
 
 
 async def gemini_suggest(client, model: str, prompt: str) -> dict:
-    return await _json_call(client, model, SUGGEST_PROMPT, prompt, SUGGEST_SCHEMA, max_tokens=200, temperature=0.4)
+    return await _json_call(client, model, SUGGEST_PROMPT, prompt, SUGGEST_SCHEMA, max_tokens=400, temperature=0.4)
 
 
 async def consider(client, model: str, user_id: str | None, turns) -> dict | None:
@@ -461,7 +461,7 @@ DECIDE_SCHEMA = {
 
 
 async def gemini_decide(client, model: str, prompt: str) -> dict:
-    return await _json_call(client, model, DECIDE_PROMPT, prompt, DECIDE_SCHEMA, max_tokens=60)
+    return await _json_call(client, model, DECIDE_PROMPT, prompt, DECIDE_SCHEMA, max_tokens=200)
 
 
 async def decide(client, model: str, offer: str, answer: str, now: float, tz_offset: int) -> dict:
@@ -521,7 +521,7 @@ HELPED_SCHEMA = {
 
 
 async def gemini_helped(client, model: str, prompt: str) -> str:
-    return (await _json_call(client, model, HELPED_PROMPT, prompt, HELPED_SCHEMA, max_tokens=20))["helped"]
+    return (await _json_call(client, model, HELPED_PROMPT, prompt, HELPED_SCHEMA, max_tokens=200))["helped"]
 
 
 async def helped(client, model: str, action: str, answer: str) -> str:

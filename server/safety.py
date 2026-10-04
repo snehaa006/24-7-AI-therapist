@@ -87,7 +87,7 @@ async def gemini_label(client, model: str, turns) -> str:
     config = types.GenerateContentConfig(
         system_instruction=CLASSIFY_PROMPT,
         temperature=0,
-        max_output_tokens=20,
+        max_output_tokens=200,  # a cap, not a cost: some models pretty-print the JSON, and a cut-off answer counts as a crisis
         response_mime_type="application/json",
         response_schema=LABEL_SCHEMA,
     )
