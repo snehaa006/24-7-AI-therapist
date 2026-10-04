@@ -19,6 +19,7 @@ import httpx
 from google.genai import errors, types
 
 TIMEOUT = 30.0
+REASONING_ROOM = 1024  # extra output tokens for a reasoning model's thinking
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,22 @@ class Provider:
 
 
 def _env(name: str, default: str) -> str:
-    return os.getenv(name, default).strip()
+    return os.getenv(name, default).strip() or default
+
+
+# Models a provider has retired, and their replacements. An old .env naming one still works.
+RETIRED = {
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",  # Groq retired the Llama models on 2026-08-16
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+}
+
+
+def _model(name: str, default: str) -> str:
+    value = _env(name, default)
+    if value in RETIRED:
+        print(f"{name}={value} has been retired, so using {RETIRED[value]}. (Change it in .env to hide this.)", flush=True)
+        return RETIRED[value]
+    return value
 
 
 def provider(name: str) -> Provider | None:
@@ -42,9 +58,9 @@ def provider(name: str) -> Provider | None:
             name="Groq",
             key_env="GROQ_API_KEY",
             base_url=_env("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            model=_env("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            fast_model=_env("GROQ_FAST_MODEL", "llama-3.1-8b-instant"),
-            reasoning_effort=_env("GROQ_REASONING_EFFORT", ""),
+            model=_model("GROQ_MODEL", "openai/gpt-oss-120b"),
+            fast_model=_model("GROQ_FAST_MODEL", "openai/gpt-oss-20b"),
+            reasoning_effort=os.getenv("GROQ_REASONING_EFFORT", "low").strip(),  # gpt-oss: low / medium / high
             strict_schema=False,  # only some Groq models take json_schema
         )
     if name == "grok":
@@ -55,7 +71,7 @@ def provider(name: str) -> Provider | None:
             base_url=_env("XAI_BASE_URL", "https://api.x.ai/v1"),
             model=model,
             fast_model=_env("GROK_FAST_MODEL", model),
-            reasoning_effort=_env("GROK_REASONING_EFFORT", "none"),  # no thinking: spoken replies need speed
+            reasoning_effort=os.getenv("GROK_REASONING_EFFORT", "none").strip(),  # no thinking: spoken replies need speed
             strict_schema=True,
         )
     return None
@@ -108,10 +124,12 @@ def request_body(p: Provider, model: str, contents, config: types.GenerateConten
     body = {"model": p.fast_model if "lite" in model else p.model, "messages": messages(contents, system)}
     if config.temperature is not None:
         body["temperature"] = config.temperature
-    if config.max_output_tokens:
-        body["max_tokens"] = config.max_output_tokens
     if p.reasoning_effort:
         body["reasoning_effort"] = p.reasoning_effort
+    if config.max_output_tokens:
+        # Reasoning counts toward the cap: leave room for it, or a short answer comes back empty.
+        thinking = p.reasoning_effort and p.reasoning_effort != "none"
+        body["max_tokens"] = config.max_output_tokens + (REASONING_ROOM if thinking else 0)
     if schema and p.strict_schema:
         body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
     elif schema or config.response_mime_type == "application/json":
