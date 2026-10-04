@@ -126,7 +126,7 @@ def test_rest_follows_googles_retry_delay():
     run(c)
     assert c._rest_until[(0, "m")] - c._rest_until.get((1, "m"), 0) > 58000
     msg = keys.quota_message(err, "Natural voice", 2)
-    assert "16 hours" in msg and "same Google Cloud project" in msg and "{" not in msg
+    assert "16 hours" in msg and "same project" in msg and "{" not in msg
 
 
 def test_rest_doubles_on_repeated_quota_errors():

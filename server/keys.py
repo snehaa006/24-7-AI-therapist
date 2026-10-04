@@ -34,12 +34,12 @@ MAX_REST = 24 * 60 * 60
 BAD_KEY_REST = 30 * 60  # invalid, disabled or not allowed: rest long, someone has to fix it
 
 
-def load_keys() -> list[str]:
-    """Every key set in the environment, in order, without duplicates or the .env.example placeholder."""
-    found = re.split(r"[\s,;]+", os.getenv("GEMINI_API_KEYS", ""))
-    found += [os.getenv("GEMINI_API_KEY", ""), os.getenv("GOOGLE_API_KEY", "")]
+def load_keys(name: str = "GEMINI_API_KEY", also: tuple[str, ...] = ("GOOGLE_API_KEY",)) -> list[str]:
+    """Every key set in the environment (NAMES=a,b · NAME · NAME_2, NAME_3…), in order, without duplicates or placeholders."""
+    found = re.split(r"[\s,;]+", os.getenv(f"{name}S", ""))
+    found += [os.getenv(name, "")] + [os.getenv(n, "") for n in also]
     numbered = sorted(
-        (int(m.group(1)), v) for k, v in os.environ.items() if (m := re.fullmatch(r"GEMINI_API_KEY_(\d+)", k))
+        (int(m.group(1)), v) for k, v in os.environ.items() if (m := re.fullmatch(rf"{name}_(\d+)", k))
     )
     found += [v for _, v in numbered]
     keys = []
@@ -73,7 +73,7 @@ def quota_message(e: Exception, what: str, keys: int) -> str:
     """A short, readable explanation for a used-up quota (the raw error is a page of JSON)."""
     secs = retry_delay(e)
     when = f" It resets in about {round(secs / 3600)} hours." if secs >= 3600 else ""
-    tip = " Keys made in the same Google Cloud project share one quota, so add keys from other projects." if keys > 1 else ""
+    tip = " Keys made in the same project share one quota, so add keys from other projects or accounts." if keys > 1 else ""
     return f"{what} limit reached on all {keys} key{'s' * (keys > 1)}.{when}{tip}"
 
 

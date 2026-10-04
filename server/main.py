@@ -24,6 +24,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 import actions
+import compat
 import feedback
 import keys
 import memory
@@ -73,18 +74,40 @@ ask casually, the way a friend would ("Sorry, did you say your sister or your si
 """
 
 app = FastAPI(title="24/7 AI Therapist")
-_client: keys.RotatingClient | None = None
+# Which service writes the text: "gemini" (default), "groq" or "grok" (compat.py). Voices always use Gemini.
+PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+COMPAT = compat.provider(PROVIDER)
+PROVIDER_NAME = COMPAT.name if COMPAT else "Gemini"
+if COMPAT:
+    # The safety label goes to the main model, not the small quick-check one: it matters most.
+    SAFETY_MODEL = SAFETY_FALLBACK_MODEL = MODEL
+_client: keys.RotatingClient | None = None  # text calls with Groq or Grok
+_gemini: keys.RotatingClient | None = None  # Gemini, for the natural voices (and text when PROVIDER is gemini)
 
 
-def client() -> keys.RotatingClient:
-    """Every Gemini call goes through here. With several keys set, a key that runs out is skipped (keys.py)."""
-    global _client
-    if _client is None:
+def gemini_client() -> keys.RotatingClient:
+    """With several keys set, a key that runs out is skipped (keys.py)."""
+    global _gemini
+    if _gemini is None:
         found = keys.load_keys()
         if not found:
             raise HTTPException(500, "GEMINI_API_KEY is not set. Copy server/.env.example to server/.env.")
-        _client = keys.RotatingClient(found)
+        _gemini = keys.RotatingClient(found)
         print(f"Gemini: {len(found)} API key{'s' * (len(found) > 1)} loaded.", flush=True)
+    return _gemini
+
+
+def client() -> keys.RotatingClient:
+    """Every text call (reply, checks, memory, exercises) goes through here."""
+    global _client
+    if not COMPAT:
+        return gemini_client()
+    if _client is None:
+        found = keys.load_keys(COMPAT.key_env, also=())
+        if not found:
+            raise HTTPException(500, f"{COMPAT.key_env} is not set (LLM_PROVIDER={PROVIDER}). Add it to server/.env.")
+        _client = keys.RotatingClient(found, make_client=lambda api_key: compat.CompatClient(COMPAT, api_key))
+        print(f"{COMPAT.name}: {len(found)} API key{'s' * (len(found) > 1)} loaded, models {COMPAT.model} / {COMPAT.fast_model}.", flush=True)
     return _client
 
 
@@ -127,10 +150,11 @@ class ChatResponse(BaseModel):
     action: dict | None = None  # step 5: {type: offer | start | reminder | need_time | declined | dropped | saved, ...}
 
 
-def gemini_failed(e: Exception, what: str = "Gemini") -> HTTPException:
+def gemini_failed(e: Exception, what: str | None = None, pool: keys.RotatingClient | None = None) -> HTTPException:
     """A short error for the app to show: a used-up quota is explained in a line, not a page of JSON."""
+    what = what or PROVIDER_NAME
     if keys.failure(e) == "quota":
-        return HTTPException(429, keys.quota_message(e, what, len(client().keys)))
+        return HTTPException(429, keys.quota_message(e, what, len((pool or client()).keys)))
     return HTTPException(502, f"{what} request failed: {getattr(e, 'message', None) or e}")
 
 
@@ -167,9 +191,11 @@ def crisis_resources():
 
 @app.get("/api/health")
 def health():
-    found = keys.load_keys()
-    pool = _client.status() if _client else {"keys": len(found), "resting": 0}
-    return {"ok": True, "model": MODEL, "key_set": bool(found), **pool}
+    found = keys.load_keys(COMPAT.key_env, also=()) if COMPAT else keys.load_keys()
+    live = _client if COMPAT else _gemini
+    pool = live.status() if live else {"keys": len(found), "resting": 0}
+    model = COMPAT.model if COMPAT else MODEL
+    return {"ok": True, "provider": PROVIDER_NAME.lower(), "model": model, "key_set": bool(found), **pool}
 
 
 def crisis_response() -> ChatResponse:
@@ -237,7 +263,7 @@ async def chat(req: ChatRequest, tasks: BackgroundTasks):
     except Exception as e:  # network, quota, bad key, unknown model
         raise gemini_failed(e) from e
     if not reply:
-        raise HTTPException(502, "Gemini returned an empty reply.")
+        raise HTTPException(502, f"{PROVIDER_NAME} returned an empty reply.")
     return ChatResponse(reply=reply, action=found and found.get("event"))
 
 
@@ -556,14 +582,14 @@ async def speak(req: SpeakRequest):
         ),
     )
     try:
-        resp = await client().aio.models.generate_content(
+        resp = await gemini_client().aio.models.generate_content(
             model=TTS_MODEL, contents=f"{TTS_STYLE}\n{req.text}", config=config
         )
         data = resp.candidates[0].content.parts[0].inline_data
     except HTTPException:
         raise
     except Exception as e:  # quota (TTS free limits are low), bad key, unknown model, empty response
-        raise gemini_failed(e, "Natural voice") from e
+        raise gemini_failed(e, "Natural voice", gemini_client()) from e
 
     audio = data.data
     # Gemini returns raw 16-bit PCM (audio/L16;rate=24000); wrap it so browsers can play it.
