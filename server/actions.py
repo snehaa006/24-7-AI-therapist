@@ -14,6 +14,7 @@ code from how each type went (feedback.py); Gemini writes the wording and the ex
 """
 
 import json
+import logging
 import re
 import time
 from contextlib import contextmanager
@@ -24,6 +25,8 @@ from google.genai import types
 import feedback
 import memory
 import safety
+
+log = logging.getLogger("uvicorn.error")
 
 # ── Storage ──────────────────────────────────────────────────────────────────
 
@@ -369,7 +372,8 @@ async def make_exercise(
     for _ in range(2):
         try:
             clean, _errors = validate_exercise(await gemini_exercise(client, model, prompt))
-        except Exception:  # quota, network, bad JSON
+        except Exception as e:  # quota, network, bad JSON
+            log.warning("Exercise call failed (%s): %s", model, e)
             clean = None
         if clean:
             return clean, "gemini"
@@ -423,7 +427,8 @@ async def consider(client, model: str, user_id: str | None, turns) -> dict | Non
     chosen = feedback.choose(st)
     try:
         out = await gemini_suggest(client, model, suggest_input(user_id, turns, chosen, feedback.history_line(st)))
-    except Exception:
+    except Exception as e:
+        log.warning("Suggest call failed (%s): %s", model, e)
         return None
     action, line = (out.get("action") or "").strip(), (out.get("line") or "").strip()
     if not out.get("suggest") or out.get("type") != chosen or not action or not line or len(action) > 120 or len(line) > 400:

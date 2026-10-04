@@ -11,10 +11,13 @@ A crisis gets a fixed, human-written script (never AI text) plus helpline detail
 """
 
 import json
+import logging
 import os
 import re
 
 from google.genai import types
+
+log = logging.getLogger("uvicorn.error")  # shows in the uvicorn terminal
 
 # ── 1. Keywords ──────────────────────────────────────────────────────────────
 # Deliberately tight around self-harm and suicide so everyday figures of speech
@@ -98,7 +101,8 @@ async def classify(client, model: str, turns) -> bool:
     """True if the latest message is a crisis. Any failure counts as a crisis."""
     try:
         return await gemini_label(client, model, turns) != "normal"
-    except Exception:
+    except Exception as e:
+        log.warning("Safety check failed (%s), so this message counts as a crisis: %s", model, e)
         return True
 
 
