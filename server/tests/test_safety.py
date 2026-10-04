@@ -88,9 +88,26 @@ def test_gemini_crisis_label_drops_the_reply(api):
 
 
 def test_gemini_failure_counts_as_crisis(api):
+    """Both the safety model and its fallback fail: the message counts as a crisis."""
     client, state = api
     state["label"] = RuntimeError("quota exceeded")
     assert say(client, "I had an okay day I guess")["crisis"] is True
+    assert sum(c[0] == "label" for c in state["calls"]) == 2
+
+
+def test_safety_model_failure_falls_back_to_second_model(monkeypatch):
+    asked = []
+
+    async def label(client, model, turns):
+        asked.append(model)
+        if model == "small":
+            raise RuntimeError("429 RESOURCE_EXHAUSTED")
+        return "normal"
+
+    monkeypatch.setattr(safety, "gemini_label", label)
+    turns = [main.Turn(role="user", text="cooking pasta makes me feel so much better")]
+    assert asyncio.run(safety.classify(None, "small", turns, fallback="big")) is False
+    assert asked == ["small", "big"]
 
 
 def test_label_and_reply_run_in_parallel(api):
