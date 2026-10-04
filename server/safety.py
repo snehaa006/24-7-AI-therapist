@@ -94,8 +94,6 @@ async def gemini_label(client, model: str, turns) -> str:
         response_mime_type="application/json",
         response_schema=LABEL_SCHEMA,
     )
-    if "2.5-flash" in model:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     resp = await client.aio.models.generate_content(model=model, contents=classifier_input(turns), config=config)
     return json.loads(resp.text)["label"]
 

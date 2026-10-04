@@ -32,15 +32,15 @@ import safety
 
 load_dotenv()
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-2.5-flash-lite")  # fast "is the user done talking?" check
-SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-2.5-flash-lite")  # labels each message normal/crisis
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+TURN_MODEL = os.getenv("GEMINI_TURN_MODEL", "gemini-3.5-flash-lite")  # fast "is the user done talking?" check
+SAFETY_MODEL = os.getenv("GEMINI_SAFETY_MODEL", "gemini-3.5-flash-lite")  # labels each message normal/crisis
 # Asked when the safety model fails (usually its quota). A different model has its own quota.
 SAFETY_FALLBACK_MODEL = os.getenv("GEMINI_SAFETY_FALLBACK_MODEL", MODEL)
-TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
-MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-2.5-flash")  # end-of-session notes and the returning greeting
-ACTION_MODEL = os.getenv("GEMINI_ACTION_MODEL", "gemini-2.5-flash-lite")  # suggest? yes/later/no? did it help?
-EXERCISE_MODEL = os.getenv("GEMINI_EXERCISE_MODEL", "gemini-2.5-flash")  # writes the guided exercises
+TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")
+MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", "gemini-3.8-flash")  # end-of-session notes and the returning greeting
+ACTION_MODEL = os.getenv("GEMINI_ACTION_MODEL", "gemini-3.5-flash-lite")  # suggest? yes/later/no? did it help?
+EXERCISE_MODEL = os.getenv("GEMINI_EXERCISE_MODEL", "gemini-3.8-flash")  # writes the guided exercises
 MAX_TURNS = 40  # history sent to Gemini each turn; keeps prompts short on the free tier
 
 SYSTEM_PROMPT = """\
@@ -81,6 +81,11 @@ PROVIDER_NAME = COMPAT.name if COMPAT else "Gemini"
 if COMPAT:
     # The safety label goes to the main model, not the small quick-check one: it matters most.
     SAFETY_MODEL = SAFETY_FALLBACK_MODEL = MODEL
+print(
+    f"Text: {PROVIDER_NAME} ({COMPAT.model if COMPAT else MODEL}). Voices: Gemini {TTS_MODEL}."
+    + ("" if COMPAT or PROVIDER == "gemini" else f" (Unknown LLM_PROVIDER={PROVIDER!r}, so using Gemini.)"),
+    flush=True,
+)
 _client: keys.RotatingClient | None = None  # text calls with Groq or Grok
 _gemini: keys.RotatingClient | None = None  # Gemini, for the natural voices (and text when PROVIDER is gemini)
 
@@ -92,7 +97,7 @@ def gemini_client() -> keys.RotatingClient:
         found = keys.load_keys()
         if not found:
             raise HTTPException(500, "GEMINI_API_KEY is not set. Copy server/.env.example to server/.env.")
-        _gemini = keys.RotatingClient(found)
+        _gemini = keys.RotatingClient(found, prepare=keys.gemini_tuning)
         print(f"Gemini: {len(found)} API key{'s' * (len(found) > 1)} loaded.", flush=True)
     return _gemini
 
@@ -170,18 +175,8 @@ def to_contents(history: list[Turn]) -> list[types.Content]:
     ]
 
 
-def no_thinking(model: str, config: types.GenerateContentConfig) -> types.GenerateContentConfig:
-    # 2.5 Flash models "think" by default, which adds seconds of latency to every spoken turn.
-    if "2.5-flash" in model:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
-    return config
-
-
 def generation_config(memories: str = "") -> types.GenerateContentConfig:
-    return no_thinking(
-        MODEL,
-        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT + memories, temperature=0.9, max_output_tokens=300),
-    )
+    return types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT + memories, temperature=0.9, max_output_tokens=300)
 
 
 @app.get("/api/crisis")
@@ -522,10 +517,7 @@ class TurnResponse(BaseModel):
 @app.post("/api/turn", response_model=TurnResponse)
 async def turn(req: TurnRequest):
     prompt = f'Listener just asked: "{req.last_assistant}"\nUser has said so far: "{req.user_text}"'
-    config = no_thinking(
-        TURN_MODEL,
-        types.GenerateContentConfig(system_instruction=TURN_PROMPT, temperature=0, max_output_tokens=20),
-    )
+    config = types.GenerateContentConfig(system_instruction=TURN_PROMPT, temperature=0, max_output_tokens=20)
     try:
         resp = await client().aio.models.generate_content(model=TURN_MODEL, contents=prompt, config=config)
     except HTTPException:

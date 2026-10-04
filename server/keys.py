@@ -24,14 +24,15 @@ import time
 from types import SimpleNamespace
 
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 
 log = logging.getLogger("keys")
 
 PLACEHOLDERS = {"", "your-key-here", "key1", "key2", "key3"}
 RATE_LIMIT_REST = 60  # seconds a key rests after a 429; doubles on each 429 in a row (daily quota gone)
 MAX_REST = 24 * 60 * 60
-BAD_KEY_REST = 30 * 60  # invalid, disabled or not allowed: rest long, someone has to fix it
+BAD_KEY_REST = 30 * 60
+THINKING_ROOM = 1024  # extra output tokens for 3.x Flash's (low) thinking, so the answer isn't cut short  # invalid, disabled or not allowed: rest long, someone has to fix it
 
 
 def load_keys(name: str = "GEMINI_API_KEY", also: tuple[str, ...] = ("GOOGLE_API_KEY",)) -> list[str]:
@@ -50,7 +51,7 @@ def load_keys(name: str = "GEMINI_API_KEY", also: tuple[str, ...] = ("GOOGLE_API
 
 
 def failure(e: Exception) -> str | None:
-    """'quota' or 'bad_key' when another key could succeed, 'busy' for a server-side hiccup, else None."""
+    """'quota', 'bad_key' or 'model_gone' when another key could succeed, 'busy' for a server-side hiccup, else None."""
     if not isinstance(e, errors.APIError):
         return None
     msg = str(e).lower()
@@ -58,6 +59,8 @@ def failure(e: Exception) -> str | None:
         return "quota"
     if e.code in (401, 403) or (e.code == 400 and "api key" in msg):
         return "bad_key"
+    if e.code == 404 and "no longer available" in msg:
+        return "model_gone"  # retired for newer keys; an older key may still have it
     if e.code in (500, 502, 503, 504):
         return "busy"
     return None
@@ -77,12 +80,33 @@ def quota_message(e: Exception, what: str, keys: int) -> str:
     return f"{what} limit reached on all {keys} key{'s' * (keys > 1)}.{when}{tip}"
 
 
+def gemini_tuning(model: str, config: types.GenerateContentConfig | None) -> types.GenerateContentConfig | None:
+    """The fastest sensible settings for each Gemini family; thinking adds seconds to every spoken turn.
+    2.5 Flash: thinking off. 3.x: the lowest thinking level the model takes (Flash-Lite: minimal,
+    Flash: low), and its default temperature, which Google recommends for 3.x."""
+    if config is None or "tts" in model:
+        return config
+    if "2.5-flash" in model:
+        return config.model_copy(update={"thinking_config": types.ThinkingConfig(thinking_budget=0)})
+    if re.search(r"gemini-3", model):
+        lite = "lite" in model
+        update = {
+            "thinking_config": types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL if lite else types.ThinkingLevel.LOW),
+            "temperature": None,
+        }
+        if config.max_output_tokens and not lite:
+            update["max_output_tokens"] = config.max_output_tokens + THINKING_ROOM  # thoughts count toward the cap
+        return config.model_copy(update=update)
+    return config
+
+
 class RotatingClient:
-    def __init__(self, keys: list[str], make_client=genai.Client):
+    def __init__(self, keys: list[str], make_client=genai.Client, prepare=None):
         if not keys:
             raise ValueError("No Gemini API keys.")
         self.keys = keys
         self._make = make_client
+        self._prepare = prepare  # (model, config) → config, applied to every call (gemini_tuning for Gemini)
         self._clients: dict[int, genai.Client] = {}
         self._rest_until: dict[tuple[int, str], float] = {}  # (key, model) → when it may be used again; model '*' = all
         self._strikes: dict[tuple[int, str], int] = {}  # 429s in a row
@@ -112,6 +136,8 @@ class RotatingClient:
             self._strikes[k] = self._strikes.get(k, 0) + 1
             secs = retry_delay(e) or RATE_LIMIT_REST * 2 ** (self._strikes[k] - 1)
             secs = min(MAX_REST, secs)
+        elif why == "model_gone":
+            secs = MAX_REST
         else:
             model, secs = "*", BAD_KEY_REST
         self._rest_until[(i, model)] = time.monotonic() + secs
@@ -128,6 +154,8 @@ class RotatingClient:
 
     async def generate_content(self, **kwargs):
         model = str(kwargs.get("model", ""))
+        if self._prepare and "config" in kwargs:
+            kwargs["config"] = self._prepare(model, kwargs["config"])
         last = None
         for i in self._order(model):
             try:
