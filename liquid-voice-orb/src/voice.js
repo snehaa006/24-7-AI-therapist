@@ -372,6 +372,12 @@ export async function speak(text, settings = {}, { onStart, onFallback } = {}) {
   }
 }
 
+/** Start generating the natural-voice audio for `text` now, so it plays at once when spoken later. */
+export function prefetchSpeech(text, settings = {}) {
+  if (settings.source !== 'natural' || !text) return;
+  voiceChunks(text).forEach((c) => fetchVoice(c, settings.naturalVoice).catch(() => {}));
+}
+
 export function stopSpeaking() {
   const token = current;
   current = null;

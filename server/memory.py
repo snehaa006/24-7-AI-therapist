@@ -124,6 +124,27 @@ def merge(user_id: str, session_id: str, found: dict) -> int:
     return added
 
 
+def add_note(user_id: str, text: str, kind: str = "fact") -> bool:
+    """Save one note outside the end-of-session extraction (e.g. how an exercise went)."""
+    text = text.strip()
+    if not text or safety.keyword_crisis(text):
+        return False
+    with db() as conn:
+        seen = {_key(r["text"]) for r in conn.execute("SELECT text FROM memories WHERE user_id = ?", (user_id,))}
+        if _key(text) in seen:
+            return False
+        conn.execute(
+            "INSERT INTO memories (user_id, kind, text, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, kind, text[:300], time.time()),
+        )
+        conn.execute(
+            "DELETE FROM memories WHERE user_id = ? AND id NOT IN "
+            "(SELECT id FROM memories WHERE user_id = ? ORDER BY id DESC LIMIT ?)",
+            (user_id, user_id, MAX_MEMORIES),
+        )
+    return True
+
+
 # ── Extraction ───────────────────────────────────────────────────────────────
 
 EXTRACT_PROMPT = """\

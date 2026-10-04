@@ -1,11 +1,12 @@
 # 24-7-AI-therapist
 
-A voice-first AI companion you can talk to any time. This build covers **steps 1 to 4** of the plan:
+A voice-first AI companion you can talk to any time. This build covers **steps 1 to 5** of the plan:
 
 1. **Voice loop.** Mic → speech-to-text → reply → spoken output (browser Web Speech API).
 2. **Real conversation.** Replies come from Gemini with a system prompt (listen, reflect, ask one follow-up, no advice lists). The whole session history is sent each turn.
 3. **Safety.** Every message is screened for crisis signs. A crisis gets a fixed, human-written message (not AI) and an on-screen card with tap-to-call helpline numbers.
 4. **Memory.** At the end of a session, lasting details and patterns are saved. Next time, the AI greets you with something from last time and keeps those details in mind.
+5. **Action and follow-through.** When it fits, the AI suggests one small thing to do (based on what you said and what helped before). Do it now as a guided exercise, set a reminder for later, or say no. Afterwards it asks how it felt and remembers.
 
 ```
 liquid-voice-orb/   React + Vite frontend (orb, landing page, voice session)
@@ -42,8 +43,9 @@ Open http://localhost:5173 **in Chrome**, slide **Start Now**, and allow the mic
 | 2 | Open http://localhost:5173 with the backend running | A five-turn talk where every reply follows from what you said. Open **Transcript** to review it |
 | 3 | `cd server && pip install -r requirements-dev.txt && pytest` | Every crisis test phrase triggers the safety response; none of the look-alikes ("this traffic is killing me") do |
 | 4 | Talk about something specific (a pet's name, an event coming up), tap **End**, then start again | The greeting brings up that detail. **Memories** on the start screen shows what was saved |
+| 5 | Open http://localhost:5173/?fastExercise=1, talk about something stressful for a couple of turns, answer the suggestion with "later, in 1 minute", wait | The reminder fires, the check-in runs the exercise, and your answer to "How did that feel?" shows up in **Memories** |
 
-The frontend has Playwright tests with the mic, speech output and backend faked: `cd liquid-voice-orb && npm run test:e2e` (first time: `npx playwright install chromium`).
+The frontend has Playwright tests with the mic and speech output faked: `cd liquid-voice-orb && npm run test:e2e` (first time: `npx playwright install chromium`). Most mock the backend; the step 5 test runs the real backend with Gemini stubbed (`server/tests/e2e_server.py`), so it needs the server's packages: it uses `server/.venv` if present, else `python3` (or set `PYTHON`). It waits a real minute for the reminder, so the suite takes about 3 minutes.
 
 ## How a turn works
 
@@ -78,6 +80,23 @@ Tests (`server/tests/test_safety.py`) run 22 crisis phrases and 21 look-alikes t
 
 Tests: `server/tests/test_memory.py` (Gemini stubbed; a live test runs if `GEMINI_API_KEY` is set) and `liquid-voice-orb/e2e/memory.spec.js`.
 
+## Action and follow-through (step 5)
+
+- **Suggesting.** From your second message on, a fast model (`GEMINI_ACTION_MODEL`, JSON schema) looks at the recent conversation, your memories and how past actions went, and decides whether to suggest ONE small thing (3 to 6 minutes, doable where you are). It runs alongside the reply, so it adds no delay. If it says yes, its suggestion ("Want to try a five-minute walk with your favourite music?") replaces the reply. At most one suggestion per session, and **never on a crisis turn or after a crisis in the same session.**
+- **Your answer** goes through the same fast model (JSON: `now` / `later` with minutes or a clock time / `no` / `other`), not a regex. The safety check still runs first.
+  - **Now:** Gemini (`GEMINI_EXERCISE_MODEL`) writes the exercise for you, as JSON `{title, intro, steps: [{say, seconds}], closing}`, using your words, memories and what helped before. The server checks it: 3 to 6 minutes in total, 4 to 15 steps, 5 to 90 s each, plain spoken text (no markdown, links, emojis), nothing medical or risky (fasting, hard exertion, driving, medication, alcohol…). If it fails, it tries once more, then uses a built-in breathing exercise, so the flow never breaks.
+  - **Later / at 6:** the AI confirms the time ("I'll check in with you at 6:00 pm") and saves a reminder. If you didn't say when, it asks. The exercise is written in the background and stored with the reminder.
+  - **No** (or you talk about something else): it drops it and carries on.
+- **Exercise mode.** Shows the current step, a countdown, overall progress, and Pause / Stop. Each step is spoken as it starts; with natural voices, the next step's audio is generated while the current one runs. The mic is off during the steps and comes back on at the end, when the AI asks "How did that feel?"
+- **Reminders** are stored in SQLite (user id, action, exercise JSON, due time, status). The app sets a timer and shows a browser notification when one is due (it asks for permission when the first one is set). If you're mid-conversation, the check-in waits for a pause. Opening the app with a due or overdue reminder starts the session with its check-in: "Ready to do it now?" (now, later, or no).
+- **Outcome.** Your answer to "How did that feel?" is labelled yes / somewhat / no by the fast model and saved (action, done or stopped early or skipped, helped, your words) to SQLite and as a memory note ("Tried a five-minute walk: it helped."). Skipping a check-in is saved too. `GET /api/outcomes?user_id=…` lists them, for step 6.
+- **Limit:** reminders only fire while the app is open in a browser tab (an in-app timer, no push server or service worker). A reminder missed while the tab was closed becomes a check-in the next time you open the app.
+- **Testing shortcuts:** say "in 1 minute" for a reminder a minute away, and open the app with `?fastExercise=1` to squeeze every exercise into about 20 seconds.
+
+Cost: one extra fast-model call per message while a suggestion is possible or an answer is expected, and one exercise call (two if the first fails the checks) per accepted action.
+
+Tests: `server/tests/test_actions.py` (validation and fallback, suggesting, now / later / no, reminders, check-in, outcome storage; Gemini stubbed, plus a live test if `GEMINI_API_KEY` is set) and `liquid-voice-orb/e2e/actions.spec.js`.
+
 ## Voice and pacing
 
 Tap **Voice** (on the start screen or during a session):
@@ -92,7 +111,8 @@ Settings are saved in this browser.
 
 - Speech recognition uses Chrome's built-in service, which sends audio to Google. It needs internet and works in Chrome or Edge, not Firefox.
 - On Gemini's free tier, prompts may be used by Google to improve its products. Use test conversations only.
-- Models are set in `server/.env` (`GEMINI_MODEL`, `GEMINI_TURN_MODEL`, `GEMINI_SAFETY_MODEL`, `GEMINI_TTS_MODEL`). Check current model IDs in AI Studio.
-- Each turn now uses up to four Gemini calls (turn check, safety label, reply, voice). On the free tier, switch to device voices if you hit limits. Running out of quota on the safety model makes every message count as a crisis, by design.
+- Models are set in `server/.env` (`GEMINI_MODEL`, `GEMINI_TURN_MODEL`, `GEMINI_SAFETY_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_MEMORY_MODEL`, `GEMINI_ACTION_MODEL`, `GEMINI_EXERCISE_MODEL`). Check current model IDs in AI Studio.
+- Each turn now uses up to five Gemini calls (turn check, safety label, reply, action check, voice). On the free tier, switch to device voices if you hit limits. Running out of quota on the safety model makes every message count as a crisis, by design.
 - The safety layer is a backstop, not a guarantee. It has not been clinically reviewed.
-- Memories are stored as plain text on the server, keyed only by the browser's id. Anyone with that id can read them. Fine for local testing; add real accounts and encryption before hosting this for other people.
+- Exercises are gentle and short, and checked for risky content, but they are not clinically reviewed.
+- Memories, reminders and outcomes are stored as plain text on the server, keyed only by the browser's id. Anyone with that id can read them. Fine for local testing; add real accounts and encryption before hosting this for other people.

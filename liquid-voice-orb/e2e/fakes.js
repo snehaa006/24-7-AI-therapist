@@ -48,5 +48,23 @@ export function installFakes() {
     return beacon(...args);
   };
 
-  localStorage.setItem('voice-settings-v1', JSON.stringify({ source: 'device', pacing: 'quick' }));
+  // Notifications: permission is granted when asked; shown ones are recorded.
+  window.__notifications = [];
+  window.__notifyAsked = 0;
+  class FakeNotification {
+    static permission = 'default';
+    static requestPermission() {
+      window.__notifyAsked++;
+      FakeNotification.permission = 'granted';
+      return Promise.resolve('granted');
+    }
+    constructor(title, options = {}) {
+      window.__notifications.push({ title, ...options });
+    }
+  }
+  window.Notification = FakeNotification;
+
+  if (!localStorage.getItem('voice-settings-v1')) {
+    localStorage.setItem('voice-settings-v1', JSON.stringify({ source: 'device', pacing: 'quick' }));
+  }
 }
