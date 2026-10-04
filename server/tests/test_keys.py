@@ -139,3 +139,45 @@ def test_rest_doubles_on_repeated_quota_errors():
     c._rest_until.clear()
     run(c)
     assert (0, "m") not in c._strikes
+
+
+def test_gemini_tuning_per_model_family():
+    from google.genai import types
+
+    base = types.GenerateContentConfig(temperature=0, max_output_tokens=200)
+    old = keys.gemini_tuning("gemini-2.5-flash-lite", base)
+    assert old.thinking_config.thinking_budget == 0 and old.temperature == 0
+
+    lite = keys.gemini_tuning("gemini-3.5-flash-lite", base)
+    assert lite.thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+    assert lite.temperature is None and lite.max_output_tokens == 200
+
+    flash = keys.gemini_tuning("gemini-3.8-flash", base)
+    assert flash.thinking_config.thinking_level == types.ThinkingLevel.LOW  # 3.8 Flash rejects minimal
+    assert flash.max_output_tokens == 200 + keys.THINKING_ROOM
+
+    assert base.thinking_config is None, "the caller's config is not changed"
+    assert keys.gemini_tuning("gemini-3.8-flash-tts", base) is base
+
+
+def test_pool_applies_prepare_to_each_call():
+    seen = []
+
+    def make(api_key):
+        async def generate_content(**kw):
+            seen.append(kw["config"])
+            return "ok"
+
+        return SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+
+    c = keys.RotatingClient(["a"], make_client=make, prepare=lambda model, cfg: f"{model}:{cfg}")
+    asyncio.run(c.aio.models.generate_content(model="m", contents="hi", config="cfg"))
+    assert seen == ["m:cfg"]
+
+
+def test_model_retired_for_one_key_tries_the_next():
+    gone = api_error(404, "This model models/gemini-2.5-flash-lite is no longer available to new users.")
+    pool = FakePool({"a": [gone]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    assert run(c) == "ok from b"
+    assert c.status("m")["resting"] == 1 and c.status("other")["resting"] == 0

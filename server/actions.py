@@ -349,8 +349,6 @@ def _config(model: str, system: str, schema: dict, max_tokens: int, temperature:
         response_mime_type="application/json",
         response_schema=schema,
     )
-    if "2.5-flash" in model:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     return config
 
 

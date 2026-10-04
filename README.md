@@ -23,7 +23,7 @@ cd server
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # then paste your key from https://aistudio.google.com/apikey (or several, see below)
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --reload-include .env --port 8000   # restarts when .env changes too
 ```
 
 **2. Frontend** (Node 18+), in a second terminal

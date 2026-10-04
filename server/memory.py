@@ -197,8 +197,6 @@ async def gemini_extract(client, model: str, known: list[dict], turns) -> dict:
         response_mime_type="application/json",
         response_schema=EXTRACT_SCHEMA,
     )
-    if "2.5-flash" in model:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     resp = await client.aio.models.generate_content(model=model, contents=extract_input(known, turns), config=config)
     return json.loads(resp.text)
 
@@ -230,7 +228,5 @@ sentences, under 40 words, no markdown or emojis. Don't mention notes or memory.
 
 async def gemini_greeting(client, model: str, user_id: str) -> str:
     config = types.GenerateContentConfig(system_instruction=GREETING_PROMPT, temperature=0.8, max_output_tokens=120)
-    if "2.5-flash" in model:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     resp = await client.aio.models.generate_content(model=model, contents=prompt_block(user_id), config=config)
     return (resp.text or "").strip()
