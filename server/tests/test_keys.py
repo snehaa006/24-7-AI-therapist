@@ -100,8 +100,33 @@ def test_all_keys_out_raises_the_last_error():
     c = keys.RotatingClient(["a", "b"], make_client=pool)
     with pytest.raises(errors.APIError):
         run(c)
-    # every key resting: still tried, soonest back first, rather than failing without a call
-    assert run(c).startswith("ok from")
+    # every key resting: only the one back soonest is tried, so it fails (or works) fast
+    assert run(c) == "ok from a"
+    assert pool.calls == ["a", "b", "a"]
+
+
+def test_quota_is_per_model():
+    """A key out of text-to-speech quota still answers chat."""
+    pool = FakePool({"a": [api_error(429)]})
+    c = keys.RotatingClient(["a"], make_client=pool)
+    with pytest.raises(errors.APIError):
+        asyncio.run(c.aio.models.generate_content(model="tts", contents="hi"))
+    assert c.status("tts")["resting"] == 1 and c.status("chat")["resting"] == 0
+    assert asyncio.run(c.aio.models.generate_content(model="chat", contents="hi")) == "ok from a"
+
+
+def test_rest_follows_googles_retry_delay():
+    err = errors.APIError(
+        429,
+        {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED",
+                   "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "58144s"}]}},
+    )
+    assert keys.retry_delay(err) == 58144
+    c = keys.RotatingClient(["a", "b"], make_client=FakePool({"a": [err]}))
+    run(c)
+    assert c._rest_until[(0, "m")] - c._rest_until.get((1, "m"), 0) > 58000
+    msg = keys.quota_message(err, "Natural voice", 2)
+    assert "16 hours" in msg and "same Google Cloud project" in msg and "{" not in msg
 
 
 def test_rest_doubles_on_repeated_quota_errors():
@@ -110,6 +135,7 @@ def test_rest_doubles_on_repeated_quota_errors():
     for _ in range(2):
         with pytest.raises(errors.APIError):
             run(c)
-    assert c._strikes[0] == 2
+    assert c._strikes[(0, "m")] == 2
+    c._rest_until.clear()
     run(c)
-    assert c._strikes[0] == 0
+    assert (0, "m") not in c._strikes

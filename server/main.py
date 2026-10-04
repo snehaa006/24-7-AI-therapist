@@ -82,6 +82,7 @@ def client() -> keys.RotatingClient:
         if not found:
             raise HTTPException(500, "GEMINI_API_KEY is not set. Copy server/.env.example to server/.env.")
         _client = keys.RotatingClient(found)
+        print(f"Gemini: {len(found)} API key{'s' * (len(found) > 1)} loaded.", flush=True)
     return _client
 
 
@@ -122,6 +123,13 @@ class ChatResponse(BaseModel):
     speech: str | None = None  # what to say aloud, when it differs from `reply` (numbers read as digits)
     resources: dict | None = None  # helpline details for the on-screen crisis card
     action: dict | None = None  # step 5: {type: offer | start | reminder | need_time | declined | dropped | saved, ...}
+
+
+def gemini_failed(e: Exception, what: str = "Gemini") -> HTTPException:
+    """A short error for the app to show: a used-up quota is explained in a line, not a page of JSON."""
+    if keys.failure(e) == "quota":
+        return HTTPException(429, keys.quota_message(e, what, len(client().keys)))
+    return HTTPException(502, f"{what} request failed: {getattr(e, 'message', None) or e}")
 
 
 def to_contents(history: list[Turn]) -> list[types.Content]:
@@ -225,7 +233,7 @@ async def chat(req: ChatRequest, tasks: BackgroundTasks):
     except HTTPException:
         raise
     except Exception as e:  # network, quota, bad key, unknown model
-        raise HTTPException(502, f"Gemini request failed: {e}") from e
+        raise gemini_failed(e) from e
     if not reply:
         raise HTTPException(502, "Gemini returned an empty reply.")
     return ChatResponse(reply=reply, action=found and found.get("event"))
@@ -438,7 +446,7 @@ async def session_end(req: EndRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Gemini request failed: {e}") from e
+        raise gemini_failed(e) from e
     return {"saved": memory.merge(req.user_id, req.session_id, found)}
 
 
@@ -495,7 +503,7 @@ async def turn(req: TurnRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Gemini request failed: {e}") from e
+        raise gemini_failed(e) from e
     return TurnResponse(complete="INCOMPLETE" not in (resp.text or "").upper())
 
 
@@ -553,7 +561,7 @@ async def speak(req: SpeakRequest):
     except HTTPException:
         raise
     except Exception as e:  # quota (TTS free limits are low), bad key, unknown model, empty response
-        raise HTTPException(502, f"Gemini voice failed: {e}") from e
+        raise gemini_failed(e, "Natural voice") from e
 
     audio = data.data
     # Gemini returns raw 16-bit PCM (audio/L16;rate=24000); wrap it so browsers can play it.
