@@ -288,7 +288,7 @@ async function speakDevice(text, { voiceURI, rate = 1, pitch = 1 }, token, onSta
   }
 }
 
-// ── Natural voices (Gemini TTS via the backend) ──────────────────────────────
+// ── Natural voices (Gemini or Groq TTS via the backend) ──────────────────────────────
 
 export const NATURAL_VOICES = [
   { id: 'Sulafat', note: 'Warm' },
@@ -307,6 +307,13 @@ export const NATURAL_VOICES = [
   { id: 'Leda', note: 'Youthful' },
   { id: 'Puck', note: 'Upbeat' },
   { id: 'Zephyr', note: 'Bright' },
+  // Groq (Orpheus): needs a Groq key on the server. Also stands in when a Gemini voice can't be used.
+  { id: 'hannah', label: 'Hannah', note: 'Groq · Soft' },
+  { id: 'diana', label: 'Diana', note: 'Groq · Calm' },
+  { id: 'autumn', label: 'Autumn', note: 'Groq · Warm' },
+  { id: 'daniel', label: 'Daniel', note: 'Groq · Gentle' },
+  { id: 'austin', label: 'Austin', note: 'Groq · Friendly' },
+  { id: 'troy', label: 'Troy', note: 'Groq · Deep' },
 ];
 
 // Audio already generated in this tab, keyed by voice + text (previews, greeting, retries).

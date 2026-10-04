@@ -185,6 +185,16 @@ class CompatClient:
         self._raise_for(resp)
         return (resp.json().get("text") or "").strip()
 
+    async def speech(self, text: str, voice: str, model: str) -> bytes:
+        """Text to speech (Groq's Orpheus). Returns WAV. Orpheus takes at most 200 characters per request."""
+        resp = await self._client().post(
+            "/audio/speech",
+            json={"model": model, "input": text, "voice": voice, "response_format": "wav"},
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        self._raise_for(resp)
+        return resp.content
+
     def _raise_for(self, resp: httpx.Response):
         if resp.status_code < 400:
             return

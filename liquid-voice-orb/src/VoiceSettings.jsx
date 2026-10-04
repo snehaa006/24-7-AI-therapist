@@ -80,7 +80,7 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
           />
           <p className="hint">
             {natural
-              ? 'Lifelike Gemini voices. Each new line takes a few seconds to generate (replies start after the first sentence is ready); anything heard before replays instantly. Uses your Gemini quota.'
+              ? 'Lifelike voices from Gemini, or Groq (the ones marked Groq). Each new line takes a moment to generate (replies start after the first sentence is ready); anything heard before replays instantly. If a Gemini voice fails, a similar Groq voice is used when the server has a Groq key.'
               : 'Voices built into this device. Instant, works offline, sounds more robotic.'}
           </p>
         </section>
@@ -97,7 +97,7 @@ export default function VoiceSettings({ settings, update, onClose, canPreview })
                   aria-checked={settings.naturalVoice === v.id}
                   onClick={() => update({ naturalVoice: v.id })}
                 >
-                  <span>{v.id}</span>
+                  <span>{v.label || v.id}</span>
                   <small>{v.note}</small>
                 </button>
               ))}
