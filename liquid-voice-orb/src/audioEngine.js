@@ -126,6 +126,11 @@ export class AudioEngine {
     });
   }
 
+  /** The open mic stream (null until openMic() succeeds), e.g. to record a turn. */
+  get micStream() {
+    return this._stream;
+  }
+
   /** Orb follows the user's voice. */
   showMic() {
     this._demo = false;

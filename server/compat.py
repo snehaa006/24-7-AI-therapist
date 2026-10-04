@@ -145,12 +145,35 @@ class CompatClient:
             json=request_body(self.p, model, contents, config),
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        self._raise_for(resp)
+        data = resp.json()
+        return Response(data["choices"][0]["message"].get("content") or "")
+
+    async def transcribe(self, audio: bytes, mime: str, model: str, language: str = "", prompt: str = "") -> str:
+        """Speech to text (Groq's Whisper). `prompt`: words that set the context, e.g. the listener's last question."""
+        ext = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4", "audio/mpeg": "mp3", "audio/wav": "wav"}
+        name = f"turn.{ext.get(mime.split(';')[0].strip(), 'webm')}"
+        form = {"model": model, "response_format": "json", "temperature": "0"}
+        if language:
+            form["language"] = language
+        if prompt:
+            form["prompt"] = prompt
+        resp = await self._client().post(
+            "/audio/transcriptions",
+            data=form,
+            files={"file": (name, audio, mime or "audio/webm")},
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        self._raise_for(resp)
+        return (resp.json().get("text") or "").strip()
+
+    def _raise_for(self, resp: httpx.Response):
+        if resp.status_code < 400:
+            return
         try:
             data = resp.json()
         except ValueError:
             data = {"error": {"message": resp.text[:300]}}
-        if resp.status_code >= 400:
-            err = data.get("error") if isinstance(data.get("error"), dict) else {"message": str(data.get("error") or data)}
-            message = f"{self.p.name}: {err.get('message') or err}"
-            raise errors.APIError(resp.status_code, {"error": {"code": resp.status_code, "message": message, "status": ""}})
-        return Response(data["choices"][0]["message"].get("content") or "")
+        err = data.get("error") if isinstance(data.get("error"), dict) else {"message": str(data.get("error") or data)}
+        message = f"{self.p.name}: {err.get('message') or err}"
+        raise errors.APIError(resp.status_code, {"error": {"code": resp.status_code, "message": message, "status": ""}})
