@@ -59,6 +59,8 @@ def failure(e: Exception) -> str | None:
         return "quota"
     if e.code in (401, 403) or (e.code == 400 and "api key" in msg):
         return "bad_key"
+    if "terms acceptance" in msg:
+        return "model_gone"  # this key's account hasn't accepted the model's terms; another account may have
     if e.code == 404 and "no longer available" in msg:
         return "model_gone"  # retired for newer keys; an older key may still have it
     if e.code in (500, 502, 503, 504):
