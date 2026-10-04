@@ -22,7 +22,7 @@ server/             FastAPI backend that calls Gemini (keeps the API key out of 
 cd server
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then paste your key from https://aistudio.google.com/apikey
+cp .env.example .env        # then paste your key from https://aistudio.google.com/apikey (or several, see below)
 uvicorn main:app --reload --port 8000
 ```
 
@@ -54,9 +54,10 @@ The frontend has Playwright tests with the mic and speech output faked: `cd liqu
 - The app greets you, then listens. A pause alone doesn't end your turn:
   - If your words trail off ("…and", "…because", "um"), it waits longer and shows **Take your time**.
   - Otherwise, after a short pause, a fast Gemini model (`POST /api/turn`) reads what you've said, plus the AI's last question, and decides whether your thought sounds finished. If not, it keeps waiting.
-  - After a long silence (6 s on Natural pacing) the turn ends regardless.
+  - After a long silence (5.5 s on Natural pacing) the turn ends regardless.
+  - The reply is requested at the same moment as that check, not after it, so it's usually ready as soon as the turn ends. (Skipped while you're answering a suggestion or a check-in, because those answers save a reminder or an outcome.)
   - If you start talking again while it's preparing a reply, that reply is dropped and your turn continues.
-- Your words go to `POST /api/chat` with the full session history. Gemini answers and the reply is spoken.
+- Your words go to `POST /api/chat` with the full session history. Gemini answers and the reply is spoken. The prompt asks for short, emotionally present replies in everyday spoken language, and tells Gemini the words come from speech recognition, so it answers what you most likely meant when a word is misheard.
 - Then it listens again. **Let me speak** cuts the reply short. You can also type instead of talking.
 - The orb follows your mic while you talk and the AI's voice while it speaks.
 
@@ -120,6 +121,7 @@ Tap **Voice** (on the start screen or during a session):
 - **Natural voices.** 16 Gemini voices (Sulafat, Achernar, Vindemiatrix…) via `POST /api/speak`. They sound lifelike, but Gemini makes the whole clip before sending it, so new lines take a few seconds. To cut the wait, the first sentence is generated on its own and the rest in parallel. Generated audio is cached in `server/.tts-cache/`, so the greeting and previews replay instantly. Uses your Gemini quota (up to two voice requests per reply), which is low for text-to-speech on the free tier. If a request fails, the app switches to the device voice for the rest of the session and tells you.
 - **Device voices.** Any voice built into your browser or OS. Instant, with pitch control.
 - **Speed**, and **When to reply**: Quick, Natural or Patient.
+- **Your accent**: the speech recognition language. Choosing your variant of English (India, UK, Australia…) makes transcription noticeably more accurate than the browser default.
 
 Settings are saved in this browser.
 
@@ -128,6 +130,7 @@ Settings are saved in this browser.
 - Speech recognition uses Chrome's built-in service, which sends audio to Google. It needs internet and works in Chrome or Edge, not Firefox.
 - On Gemini's free tier, prompts may be used by Google to improve its products. Use test conversations only.
 - Models are set in `server/.env` (`GEMINI_MODEL`, `GEMINI_TURN_MODEL`, `GEMINI_SAFETY_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_MEMORY_MODEL`, `GEMINI_ACTION_MODEL`, `GEMINI_EXERCISE_MODEL`). Check current model IDs in AI Studio.
+- **Several API keys.** Put more than one key in `server/.env` (`GEMINI_API_KEYS=key1,key2,key3`, or `GEMINI_API_KEY_2`, `_3`…). Calls take turns across the keys, and a key that hits its quota (429) or stops working is rested and the call retried at once on the next key (`server/keys.py`). `GET /api/health` shows how many keys are set and resting.
 - Each turn now uses up to five Gemini calls (turn check, safety label, reply, action check, voice). On the free tier, switch to device voices if you hit limits. Running out of quota on the safety model makes every message count as a crisis, by design.
 - The safety layer is a backstop, not a guarantee. It has not been clinically reviewed.
 - Exercises are gentle and short, and checked for risky content, but they are not clinically reviewed.

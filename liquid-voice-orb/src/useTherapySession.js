@@ -31,6 +31,9 @@ async function fetchReply(history, action) {
   return postJSON('/api/chat', { history, user_id: userId(), action, tz_offset: -new Date().getTimezoneOffset() });
 }
 
+/** Same step 5 flow state (so a reply asked for early still answers the right question). */
+const sameFlow = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
 const checkinLine = (r) => `It's time for ${r.action}, like we planned. Ready to do it now?`;
 
 /**
@@ -60,6 +63,8 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
   const sessionIdRef = useRef(null); // set while a session is open and not yet saved to memory
   const phaseRef = useRef('idle');
   const interimRef = useRef('');
+  // A reply requested while the end-of-turn check runs: { text, before, promise }. Used if the turn ends on that text.
+  const earlyRef = useRef(null);
   const remindersChangedRef = useRef(onRemindersChanged);
   remindersChangedRef.current = onRemindersChanged;
 
@@ -92,7 +97,9 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
     setWaiting(false);
     showPhase('listening');
     engine.showMic();
+    earlyRef.current = null;
     listenerRef.current.setPacing(settingsRef.current.pacing);
+    listenerRef.current.setLang(settingsRef.current.speechLang);
     listenerRef.current.start();
   }, [engine]);
 
@@ -281,9 +288,12 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
       engine.showIdle();
 
       const ctx = actionContext();
+      const early = earlyRef.current;
+      earlyRef.current = null;
+      const reuse = early && early.text === text && early.before === before && sameFlow(ctx, early.ctx);
       let res;
       try {
-        res = await fetchReply(withUser, ctx);
+        res = await (reuse ? early.promise : fetchReply(withUser, ctx));
       } catch (e) {
         if (turnRef.current !== turn) return;
         commit(before); // drop the turn so the user can simply say it again
@@ -309,6 +319,18 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
   const handlers = useRef({});
   handlers.current = {
     onTurn: (text) => respond(text),
+    // The user paused: ask for the reply now, while "are they done?" is being checked, so it's
+    // ready sooner. Only when replying changes nothing on the server (no reminder or outcome is
+    // saved), since the user may carry on talking and this reply would then be thrown away.
+    onPause: (text) => {
+      const ctx = actionContext();
+      if (FIXED_MODE || (ctx && ctx.mode !== 'consider')) return;
+      const before = historyRef.current;
+      if (earlyRef.current?.text === text && earlyRef.current.before === before) return;
+      const promise = fetchReply([...before, { role: 'user', text }], ctx);
+      promise.catch(() => {}); // a failure is handled when (if) it's used
+      earlyRef.current = { text, before, ctx, promise };
+    },
     // The user carried on talking before the reply started: drop it and keep listening.
     onResume: () => {
       turnRef.current++;
@@ -328,6 +350,7 @@ export function useTherapySession(engine, settings, { onRemindersChanged } = {})
       onInterim: showInterim,
       onWaiting: setWaiting,
       onTurn: (text) => handlers.current.onTurn(text),
+      onPause: (text) => handlers.current.onPause(text),
       onResume: () => handlers.current.onResume(),
       isComplete: FIXED_MODE ? null : (text) => handlers.current.isComplete(text),
       onError: (msg) => {

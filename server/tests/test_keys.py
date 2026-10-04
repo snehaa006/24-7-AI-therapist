@@ -1,0 +1,115 @@
+"""Gemini key rotation: keys from the environment, round-robin, and skipping keys that run out."""
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+from google.genai import errors
+
+import keys
+
+
+def api_error(code: int, message: str = "") -> errors.APIError:
+    return errors.APIError(code, {"error": {"code": code, "message": message, "status": ""}})
+
+
+class FakePool:
+    """Stands in for genai.Client. `fail[key]` is a list of errors that key raises, one per call."""
+
+    def __init__(self, fail=None):
+        self.fail = fail or {}
+        self.calls = []
+
+    def __call__(self, api_key):
+        async def generate_content(**kwargs):
+            self.calls.append(api_key)
+            if self.fail.get(api_key):
+                raise self.fail[api_key].pop(0)
+            return f"ok from {api_key}"
+
+        return SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+
+
+def run(client, **kw):
+    return asyncio.run(client.aio.models.generate_content(model="m", contents="hi", **kw))
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for k in ("GEMINI_API_KEYS", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_10"):
+        monkeypatch.delenv(k, raising=False)
+    return monkeypatch
+
+
+def test_load_keys_from_every_form(clean_env):
+    clean_env.setenv("GEMINI_API_KEYS", "a, b\nc")
+    clean_env.setenv("GEMINI_API_KEY", "b")  # duplicate dropped
+    clean_env.setenv("GEMINI_API_KEY_10", "z")
+    clean_env.setenv("GEMINI_API_KEY_2", "d")
+    assert keys.load_keys() == ["a", "b", "c", "d", "z"]
+
+
+def test_placeholder_is_not_a_key(clean_env):
+    clean_env.setenv("GEMINI_API_KEY", "your-key-here")
+    assert keys.load_keys() == []
+
+
+def test_round_robin_spreads_calls():
+    pool = FakePool()
+    c = keys.RotatingClient(["a", "b", "c"], make_client=pool)
+    for _ in range(4):
+        run(c)
+    assert pool.calls == ["a", "b", "c", "a"]
+
+
+def test_quota_error_moves_to_next_key_and_rests_the_key():
+    pool = FakePool({"a": [api_error(429, "Resource has been exhausted")]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    assert run(c) == "ok from b"
+    assert c.status() == {"keys": 2, "resting": 1}
+    # a is resting, so b answers the next calls too
+    run(c)
+    run(c)
+    assert pool.calls == ["a", "b", "b", "b"]
+
+
+def test_invalid_key_is_skipped():
+    pool = FakePool({"a": [api_error(400, "API key not valid. Please pass a valid API key.")]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    assert run(c) == "ok from b"
+    assert c.status()["resting"] == 1
+
+
+def test_overloaded_model_tries_another_key_without_resting():
+    pool = FakePool({"a": [api_error(503, "The model is overloaded.")]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    assert run(c) == "ok from b"
+    assert c.status()["resting"] == 0
+
+
+def test_other_errors_are_raised_at_once():
+    pool = FakePool({"a": [api_error(400, "Invalid JSON payload")]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    with pytest.raises(errors.APIError):
+        run(c)
+    assert pool.calls == ["a"]
+
+
+def test_all_keys_out_raises_the_last_error():
+    pool = FakePool({"a": [api_error(429)], "b": [api_error(429)]})
+    c = keys.RotatingClient(["a", "b"], make_client=pool)
+    with pytest.raises(errors.APIError):
+        run(c)
+    # every key resting: still tried, soonest back first, rather than failing without a call
+    assert run(c).startswith("ok from")
+
+
+def test_rest_doubles_on_repeated_quota_errors():
+    pool = FakePool({"a": [api_error(429), api_error(429)]})
+    c = keys.RotatingClient(["a"], make_client=pool)
+    for _ in range(2):
+        with pytest.raises(errors.APIError):
+            run(c)
+    assert c._strikes[0] == 2
+    run(c)
+    assert c._strikes[0] == 0

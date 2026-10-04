@@ -92,22 +92,22 @@ float disp(vec3 p){
   float t = uTime;
 
   // Idle: slow floating, breathing water-blob.
-  float idle = snoise(p * 0.85 + vec3(0.0, t * 0.10, t * 0.07)) * 0.055
-             + snoise(p * 1.60 - vec3(t * 0.08, 0.0, t * 0.05)) * 0.020;
+  float idle = snoise(p * 0.80 + vec3(0.0, t * 0.08, t * 0.06)) * 0.050
+             + snoise(p * 1.50 - vec3(t * 0.06, 0.0, t * 0.04)) * 0.016;
 
-  // Voice bands: low = broad & slow, high = fine & fast.
-  float bass = snoise(p * 0.75 + vec3(t * 0.22, 0.0, -t * 0.17)) * uBass   * 0.34;
-  float mid  = snoise(p * 1.90 + vec3(-t * 0.55, t * 0.40, 0.0)) * uMid    * 0.16;
-  float treb = snoise(p * 4.60 + vec3(t * 1.90, -t * 1.50, t * 1.2)) * uTreble * 0.075;
+  // Voice bands: broad, slow swells like a drop of water, only a faint fine ripple on top.
+  float bass = snoise(p * 0.70 + vec3(t * 0.18, 0.0, -t * 0.14)) * uBass   * 0.22;
+  float mid  = snoise(p * 1.50 + vec3(-t * 0.38, t * 0.28, 0.0)) * uMid    * 0.09;
+  float treb = snoise(p * 3.20 + vec3(t * 0.90, -t * 0.70, t * 0.6)) * uTreble * 0.025;
 
   // Changes in speech travel across the body like waves through water:
   // angular distance from the source = how far back in time we look.
   float a      = acos(clamp(dot(p, uSrc), -1.0, 1.0)) / 3.14159265;
   float h      = histAt(a);
-  float ripple = 0.65 + 0.35 * sin(a * 16.0 - t * 3.0);
-  float wave   = (h - uHistMean) * 0.30 * ripple;   // above average = bulge, below = contract
+  float ripple = 0.75 + 0.25 * sin(a * 9.0 - t * 2.0);
+  float wave   = (h - uHistMean) * 0.18 * ripple;   // above average = bulge, below = contract
 
-  float breathe = uLevel * 0.05;
+  float breathe = uLevel * 0.035;
 
   return idle + bass + mid + treb + wave + breathe - uInset;
 }
@@ -181,7 +181,7 @@ void main(){
   float s3 = pow(max(dot(n, normalize(L3 + v)), 0.0), 140.0);
 
   // liquid-glass refraction streaks, warped by the live surface displacement
-  float streak = pow(0.5 + 0.5 * sin(dot(r, vec3(3.0, 6.0, 2.0)) + vDisp * 14.0 + uTime * 0.25), 7.0);
+  float streak = pow(0.5 + 0.5 * sin(dot(r, vec3(3.0, 6.0, 2.0)) + vDisp * 6.0 + uTime * 0.18), 7.0);
   float env    = smoothstep(-0.2, 1.0, r.y);
 
   vec3 col = uDeep * 0.40;
@@ -216,9 +216,9 @@ void main(){
   vec3 pos, nrm;
   surface(p, pos, nrm);
 
-  // each particle oscillates along the surface normal with the voice
-  float vib = sin(uTime * 26.0 + aPhase * 6.2831853) * (uTreble * 0.9 + uLevel * 0.35);
-  pos += nrm * vib * 0.012;
+  // each particle drifts gently along the surface normal with the voice (kept tiny: more reads as shimmer)
+  float vib = sin(uTime * 9.0 + aPhase * 6.2831853) * (uTreble * 0.5 + uLevel * 0.2);
+  pos += nrm * vib * 0.0035;
 
   vec4 mv  = modelViewMatrix * vec4(pos, 1.0);
   vec3 nv  = normalize(normalMatrix * nrm);
@@ -229,7 +229,7 @@ void main(){
   vDisp   = length(pos) - 1.0;
 
   float facing = clamp(dot(nv, vv), 0.0, 1.0);
-  gl_PointSize = uSize * uPixelRatio * (5.4 / -mv.z) * (0.65 + 0.55 * facing) * (1.0 + uLevel * 0.35);
+  gl_PointSize = uSize * uPixelRatio * (5.4 / -mv.z) * (0.65 + 0.55 * facing) * (1.0 + uLevel * 0.10);
   gl_Position  = projectionMatrix * mv;
 }
 `;
